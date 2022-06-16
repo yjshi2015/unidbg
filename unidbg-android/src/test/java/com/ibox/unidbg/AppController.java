@@ -15,7 +15,7 @@ public class AppController {
     public Map<String, String> encrypt(String reqbody) {
         String wtoken = tigerTallyAPI.encrypt(reqbody);
         Map<String, String> map = new HashMap<>();
-        map.put("wtoken", wtoken);
+        map.put("wToken", wtoken);
         return map;
     }
 }

@@ -11,9 +11,13 @@ import com.github.unidbg.file.linux.AndroidFileIO;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
 import com.github.unidbg.linux.android.AndroidResolver;
 import com.github.unidbg.linux.android.dvm.*;
+import com.github.unidbg.linux.android.dvm.api.PackageInfo;
+import com.github.unidbg.linux.android.dvm.api.Signature;
+import com.github.unidbg.linux.android.dvm.array.ArrayObject;
 import com.github.unidbg.linux.android.dvm.array.ByteArray;
 import com.github.unidbg.memory.Memory;
 import com.github.unidbg.virtualmodule.android.AndroidModule;
+import net.dongliu.apk.parser.bean.CertificateMeta;
 
 import java.io.File;
 import java.io.IOException;
@@ -36,9 +40,9 @@ public class TigerTallyAPI extends AbstractJni implements IOResolver<AndroidFile
         final Memory memory = emulator.getMemory();
         memory.setLibraryResolver(new AndroidResolver(23));
 
-//        vm = emulator.createDalvikVM();
+        vm = emulator.createDalvikVM();
         // 创建Android虚拟机,传入APK，Unidbg可以替我们做部分签名校验的工作
-        vm = emulator.createDalvikVM(new File("D:\\ibox相关\\0_apk包记录\\v1.1.5\\ibox1.1.5.apk"));
+//        vm = emulator.createDalvikVM(new File("D:\\ibox相关\\0_apk包记录\\v1.1.5\\ibox1.1.5.apk"));
         vm.setVerbose(true);
         DalvikModule dm = vm.loadLibrary(new File("unidbg-android/src/test/resources/example_binaries/arm64-v8a/libtiger_tally.so"), false);
         vm.setJni(this);
@@ -81,7 +85,7 @@ public class TigerTallyAPI extends AbstractJni implements IOResolver<AndroidFile
     public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass dvmClass, String signature, VaList vaList) {
         switch (signature) {
             case "com/aliyun/TigerTally/A->ct()Landroid/content/Context;":
-                return vm.resolveClass("android/app/Application",vm.resolveClass("android/content/ContextWrapper",vm.resolveClass("android/content/Context"))).newObject(signature);
+                return vm.resolveClass("android/app/Application",vm.resolveClass("android/content/ContextWrapper",vm.resolveClass("android/content/Context"))).newObject(null);
 //            case "com/aliyun/TigerTally/A->pb(Ljava/lang/String;[B)Ljava/lang/String;":
 //                return new StringObject(vm,"NaNzfpjiUUl2gNOrCC7S4XS4SD0CH48UatD3GXb5Fh+NYB+0CenYh5nXysYWCfwd+sD4NbdYBDrlKPo5teC09A==");
 
@@ -108,6 +112,8 @@ public class TigerTallyAPI extends AbstractJni implements IOResolver<AndroidFile
                 // 直接resolve会报错：class com.xxxxxx.dvm.StringObject
 //                return vm.resolveClass("Ljava/lang/CharSequence;");
                 return new StringObject(vm,"Ljava/lang/CharSequence;");
+            case "android/app/Application->getPackageName()Ljava/lang/String;":
+                return new StringObject(vm, "Ljava/lang/String;");
             case "android/app/Application->getFilesDir()Ljava/io/File;":
                 return vm.resolveClass("Ljava/io/File;");
             case "java/lang/Class->getAbsolutePath()Ljava/lang/String;":
@@ -163,6 +169,20 @@ public class TigerTallyAPI extends AbstractJni implements IOResolver<AndroidFile
         }
         return super.getStaticObjectField(vm, dvmClass, signature);
     }
+
+    @Override
+    public DvmObject<?> getObjectField(BaseVM vm, DvmObject<?> dvmObject, String signature) {
+        switch (signature) {
+            case "android/content/pm/PackageInfo->versionName:Ljava/lang/String;": {
+                return new StringObject(vm, "Ljava/lang/String;");
+            }
+            case "android/content/pm/PackageInfo->signatures:[Landroid/content/pm/Signature;": {
+                return new StringObject(vm, "[Landroid/content/pm/Signature;");
+            }
+        }
+        return super.getObjectField(vm, dvmObject, signature);
+    }
+
     public void destroy() {
         try {
             emulator.close();
