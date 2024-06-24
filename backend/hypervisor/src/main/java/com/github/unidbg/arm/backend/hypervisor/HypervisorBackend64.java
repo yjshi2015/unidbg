@@ -11,9 +11,11 @@ import com.github.unidbg.Emulator;
 import com.github.unidbg.Family;
 import com.github.unidbg.arm.ARMEmulator;
 import com.github.unidbg.arm.backend.BackendException;
+import com.github.unidbg.arm.backend.CodeHook;
 import com.github.unidbg.arm.backend.DebugHook;
 import com.github.unidbg.arm.backend.HypervisorBackend;
 import com.github.unidbg.arm.backend.ReadHook;
+import com.github.unidbg.arm.backend.UnHook;
 import com.github.unidbg.arm.backend.WriteHook;
 import com.github.unidbg.debugger.BreakPoint;
 import com.github.unidbg.debugger.BreakPointCallback;
@@ -27,6 +29,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import unicorn.Arm64Const;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Stack;
 
 public class HypervisorBackend64 extends HypervisorBackend {
@@ -81,7 +85,7 @@ public class HypervisorBackend64 extends HypervisorBackend {
     @Override
     public void setSingleStep(int singleStep) {
         this.singleStep = singleStep;
-        hypervisor.enable_single_step(true);
+        step();
     }
 
     @Override
@@ -89,10 +93,15 @@ public class HypervisorBackend64 extends HypervisorBackend {
         if (thumb) {
             throw new IllegalStateException();
         }
+        for (HypervisorBreakPoint breakpoint : breakpoints) {
+            if (breakpoint != null && breakpoint.address == address) {
+                return breakpoint;
+            }
+        }
         for (int i = 0; i < breakpoints.length; i++) {
             if (breakpoints[i] == null) {
-                hypervisor.install_hw_breakpoint(i, address);
-                HypervisorBreakPoint bp = new HypervisorBreakPoint(address, callback);
+                HypervisorBreakPoint bp = new HypervisorBreakPoint(i, address, callback);
+                bp.install(hypervisor);
                 breakpoints[i] = bp;
                 return bp;
             }
@@ -113,13 +122,53 @@ public class HypervisorBackend64 extends HypervisorBackend {
     }
 
     @Override
-    public boolean handleException(long esr, long far, final long elr, long spsr) {
+    public void handleUnknownException(int ec, long esr, long far, long virtualAddress) {
+        switch (ec) {
+            case EC_DATAABORT:
+                boolean isv = (esr & ARM_EL_ISV) != 0; // Instruction Syndrome Valid. Indicates whether the syndrome information in ISS[23:14] is valid.
+                boolean isWrite = ((esr >> 6) & 1) != 0;
+                int sas = (int) ((esr >> 22) & 3); // Syndrome Access Size. Indicates the size of the access attempted by the faulting operation.
+                int accessSize = isv ? 1 << sas : 0;
+                int srt = (int) ((esr >> 16) & 0x1f); // Syndrome Register Transfer. The register number of the Wt/Xt/Rt operand of the faulting instruction.
+                /*
+                 * Width of the register accessed by the instruction is Sixty-Four.
+                 * 0b0	Instruction loads/stores a 32-bit wide register.
+                 * 0b1	Instruction loads/stores a 64-bit wide register.
+                 */
+                boolean sf = ((esr >> 15) & 1) != 0;
+                if (log.isDebugEnabled()) {
+                    log.debug("handleDataAbort srt=" + srt + ", sf=" + sf + ", accessSize=" + accessSize);
+                }
+                if (eventMemHookNotifier != null) {
+                    eventMemHookNotifier.notifyDataAbort(isWrite, accessSize, virtualAddress);
+                }
+                break;
+            case EC_INSNABORT:
+                if (eventMemHookNotifier != null) {
+                    eventMemHookNotifier.notifyInsnAbort(virtualAddress);
+                }
+                break;
+            default:
+                log.warn("handleUnknownException ec=0x" + Integer.toHexString(ec) + ", virtualAddress=0x" + Long.toHexString(virtualAddress) + ", esr=0x" + Long.toHexString(esr) + ", far=0x" + Long.toHexString(far));
+                break;
+        }
+    }
+
+    private long lastHitPointAddress;
+
+    @Override
+    public boolean handleException(long esr, long far, final long elr, long cpsr) {
         int ec = (int) ((esr >> 26) & 0x3f);
         if (log.isDebugEnabled()) {
-            log.debug("handleException syndrome=0x" + Long.toHexString(esr) + ", far=0x" + Long.toHexString(far) + ", elr=0x" + Long.toHexString(elr) + ", ec=0x" + Integer.toHexString(ec) + ", spsr=0x" + Long.toHexString(spsr));
+            log.debug("handleException syndrome=0x" + Long.toHexString(esr) + ", far=0x" + Long.toHexString(far) + ", elr=0x" + Long.toHexString(elr) + ", ec=0x" + Integer.toHexString(ec) + ", cpsr=0x" + Long.toHexString(cpsr));
         }
-        while (!visitorStack.isEmpty()) {
-            visitorStack.pop().onException();
+        if (lastHitPointAddress != elr &&
+                (ec == EC_SOFTWARESTEP || ec == EC_BREAKPOINT)) {
+            while (!visitorStack.isEmpty()) {
+                if (visitorStack.pop().onException(hypervisor, ec, elr)) {
+                    return true;
+                }
+            }
         }
         switch (ec) {
             case EC_AA64_SVC: {
@@ -133,23 +182,17 @@ public class HypervisorBackend64 extends HypervisorBackend {
                 return true;
             }
             case EC_SOFTWARESTEP: {
-                onSoftwareStep(esr, elr, spsr);
+                onSoftwareStep(esr, elr, cpsr);
                 return true;
             }
             case EC_BREAKPOINT: {
+                lastHitPointAddress = elr;
                 onBreakpoint(esr, elr);
                 for (int i = 0; i < breakpoints.length; i++) {
                     HypervisorBreakPoint bp = breakpoints[i];
                     if (bp != null && bp.address == elr) {
                         hypervisor.disable_hw_breakpoint(i);
-                        visitorStack.push(new ExceptionVisitor(i) {
-                            @Override
-                            public void onException() {
-                                if (breakpoints[super.n] != null) {
-                                    hypervisor.install_hw_breakpoint(super.n, elr);
-                                }
-                            }
-                        });
+                        visitorStack.push(ExceptionVisitor.breakRestorerVisitor(bp));
                         step();
                         break;
                     }
@@ -157,11 +200,12 @@ public class HypervisorBackend64 extends HypervisorBackend {
                 return true;
             }
             case EC_WATCHPOINT: {
-                onWatchpoint(esr, far);
+                lastHitPointAddress = elr;
+                onWatchpoint(esr, far, elr);
                 return true;
             }
             case EC_DATAABORT: {
-                boolean isv = (esr & ARM_EL_ISV) != 0;
+                boolean isv = (esr & ARM_EL_ISV) != 0; // Instruction Syndrome Valid. Indicates whether the syndrome information in ISS[23:14] is valid.
                 boolean isWrite = ((esr >> 6) & 1) != 0;
                 boolean s1ptw = ((esr >> 7) & 1) != 0;
                 int sas = (int) ((esr >> 22) & 3);
@@ -172,9 +216,37 @@ public class HypervisorBackend64 extends HypervisorBackend {
                     log.debug("handle EC_DATAABORT isv=" + isv + ", isWrite=" + isWrite + ", s1ptw=" + s1ptw + ", len=" + len + ", srt=" + srt + ", dfsc=0x" + Integer.toHexString(dfsc) + ", vaddr=0x" + Long.toHexString(far));
                 }
                 if (dfsc == 0x00 && emulator.getFamily() == Family.iOS) {
-                    return handleCommRead(far, elr);
+                    int accessSize = isv ? 1 << sas : 0;
+                    return handleCommRead(far, elr, accessSize);
                 }
                 throw new UnsupportedOperationException("handleException ec=0x" + Integer.toHexString(ec) + ", dfsc=0x" + Integer.toHexString(dfsc));
+            }
+            case EC_SYSTEMREGISTERTRAP: {
+                /*
+                 *  Direction: Indicates the direction of the trapped instruction.
+                 *  0b0	Write access, including MSR instructions.
+                 *  0b1	Read access, including MRS instructions.
+                 */
+                boolean isRead = (esr & 1) != 0;
+                int CRm = (int) ((esr >>> 1) & 0xf);
+                int Rt = (int) ((esr >>> 5) & 0x1f); // The Rt value from the issued instruction, the general-purpose register used for the transfer.
+                int CRn = (int) ((esr >>> 10) & 0xf);
+                int Op1 = ((int) (esr >>> 14) & 0x7);
+                int Op2 = ((int) (esr >>> 17) & 0x7);
+                int Op0 = ((int) (esr >>> 20) & 0x3);
+                if (isRead) {
+                    if (CRm == 0 && CRn == 14 && Op1 == 3 && Op2 == 1 && Op0 == 3) { // CNTPCT_EL0
+                        hypervisor.reg_write64(Rt, 0);
+                        hypervisor.reg_set_elr_el1(elr + 4);
+                        return true;
+                    }
+                    if (CRm == 0 && CRn == 14 && Op1 == 3 && Op2 == 2 && Op0 == 3) { // CNTVCT_EL0
+                        hypervisor.reg_write64(Rt, 0);
+                        hypervisor.reg_set_elr_el1(elr + 4);
+                        return true;
+                    }
+                }
+                throw new UnsupportedOperationException("EC_SYSTEMREGISTERTRAP isRead=" + isRead + ", CRm=" + CRm + ", CRn=" + CRn + ", Op1=" + Op1 + ", Op2=" + Op2 + ", Op0=" + Op0);
             }
             default:
                 log.warn("handleException ec=0x" + Integer.toHexString(ec));
@@ -217,31 +289,78 @@ public class HypervisorBackend64 extends HypervisorBackend {
         throw new UnsupportedOperationException("Max WRPs: " + watchpoints.length);
     }
 
-    private void onWatchpoint(long esr, long address) {
+    private long lastWatchpointAddress;
+    private long lastWatchpointDataAddress;
+
+    private void onWatchpoint(long esr, long address, long elr) {
+        boolean repeatWatchpoint = lastWatchpointAddress == elr && lastWatchpointDataAddress == address;
+        if (!repeatWatchpoint) {
+            lastWatchpointAddress = elr;
+            lastWatchpointDataAddress = address;
+        }
         boolean write = ((esr >> 6) & 1) == 1;
         int status = (int) (esr & 0x3f);
+        /*
+         * Cache maintenance. Indicates whether the Watchpoint exception came from a cache maintenance or address translation instruction:
+         * 0b0	The Watchpoint exception was not generated by the execution of one of the System instructions identified in the description of value 1.
+         * 0b1	The Watchpoint exception was generated by either the execution of a cache maintenance instruction or by a synchronous Watchpoint exception on the execution of an address translation instruction. The DC ZVA, DC GVA, and DC GZVA instructions are not classified as a cache maintenance instructions, and therefore their execution cannot cause this field to be set to 1.
+         */
+        boolean cm = ((esr >> 8) & 1) == 1;
+        int wpt = (int) ((esr >> 18) & 0x3f); // Watchpoint number, 0 to 15 inclusive.
+        boolean wptv = ((esr >> 17) & 1) == 1; // The WPT field is valid, and holds the number of a watchpoint that triggered a Watchpoint exception.
         if (log.isDebugEnabled()) {
-            log.debug("onWatchpoint write=" + write + ", address=0x" + Long.toHexString(address) + ", status=0x" + Integer.toHexString(status));
+            log.debug("onWatchpoint write=" + write + ", address=0x" + Long.toHexString(address) + ", cm=" + cm + ", wpt=" + wpt + ", wptv=" + wptv + ", status=0x" + Integer.toHexString(status));
         }
-        for (int i = 0; i < watchpoints.length; i++) {
-            if (watchpoints[i] != null && watchpoints[i].contains(address, write)) {
-                watchpoints[i].onHit(this, address, write);
-                installRestoreWatchpoint(i, watchpoints[i]);
-                return;
+        HypervisorWatchpoint hitWp = null;
+        for (int n = 0; n < watchpoints.length; n++) {
+            HypervisorWatchpoint watchpoint = watchpoints[n];
+            if (watchpoint != null && watchpoint.contains(address, write)) {
+                hitWp = watchpoint;
+                if (repeatWatchpoint) {
+                    break;
+                }
+                Pointer pc = UnidbgPointer.pointer(emulator, elr);
+                assert pc != null;
+                byte[] code = pc.getByteArray(0, 4);
+                if (watchpoint.onHit(this, address, write, createDisassembler(), code, elr)) {
+                    hypervisor.disable_watchpoint(n);
+                    visitorStack.push(ExceptionVisitor.breakRestorerVisitor(watchpoint));
+                    step();
+                    return;
+                }
             }
         }
-        interruptHookNotifier.notifyCallSVC(this, ARMEmulator.EXCP_BKPT, status);
+        if (hitWp == null) {
+            interruptHookNotifier.notifyCallSVC(this, ARMEmulator.EXCP_BKPT, status);
+        } else {
+            if (repeatWatchpoint) {
+                if (exclusiveMonitorEscaper != null) {
+                    interruptHookNotifier.notifyCallSVC(this, ARMEmulator.EXCP_BKPT, status);
+                } else {
+                    exclusiveMonitorEscaper = new ExclusiveMonitorEscaper(new WatchpointExclusiveMonitorEscaper(hitWp));
+                }
+            } else {
+                hypervisor.disable_watchpoint(hitWp.n);
+                visitorStack.push(ExceptionVisitor.breakRestorerVisitor(hitWp));
+                step();
+            }
+        }
     }
 
-    private void installRestoreWatchpoint(int n, final HypervisorWatchpoint watchpoint) {
-        hypervisor.disable_watchpoint(n);
-        visitorStack.push(new ExceptionVisitor(n) {
-            @Override
-            public void onException() {
-                watchpoint.install(hypervisor);
-            }
-        });
-        step();
+    private class WatchpointExclusiveMonitorEscaper implements ExclusiveMonitorCallback {
+        private final HypervisorWatchpoint wp;
+        WatchpointExclusiveMonitorEscaper(HypervisorWatchpoint wp) {
+            this.wp = wp;
+            hypervisor.disable_watchpoint(wp.n);
+        }
+        @Override
+        public void notifyCallback(long address) {
+        }
+        @Override
+        public void onEscapeSuccess() {
+            wp.install(hypervisor);
+            exclusiveMonitorEscaper = null;
+        }
     }
 
     private void onBreakpoint(long esr, long elr) {
@@ -253,22 +372,186 @@ public class HypervisorBackend64 extends HypervisorBackend {
         }
     }
 
-    private void onSoftwareStep(long esr, long elr, long spsr) {
+    private interface ExclusiveMonitorCallback {
+        void notifyCallback(long address);
+        void onEscapeSuccess();
+    }
+
+    /**
+     * The local exclusive monitor gets cleared on every exception return, that is, on execution of the ERET instruction.
+     * <p>
+     * from: <a href="https://xen-devel.narkive.com/wQw4F6GV/xen-arm-software-step-armv8-pc-stuck-on-instruction">xen-arm-software-step-armv8-pc-stuck-on-instruction</a>
+     * LDAXR sets the 'exclusive monitor' and STXR only succeeds if the exclusive
+     * monitor is still set. If another CPU accesses the memory protected by the
+     * exclusive monitor, the monitor is cleared. This is how the spinlock code knows
+     * it has to re-read its value and try to take the lock again.
+     * Changing exception level also clears the exclusive monitor, so taking
+     * single-step exception between a LDAXR/STXR pair means the loop has to be retried.
+     */
+    private class ExclusiveMonitorEscaper {
+        private final ExclusiveMonitorCallback callback;
+        ExclusiveMonitorEscaper(ExclusiveMonitorCallback callback) {
+            this.callback = callback;
+            step();
+        }
+        private long loadExclusiveAddress;
+        private int loadExclusiveCount;
+        private final List<Long> exclusiveRegionAddressList = new ArrayList<>();
+        private void resetRegionInfo() {
+            loadExclusiveAddress = 0;
+            loadExclusiveCount = 0;
+            exclusiveRegionAddressList.clear();
+        }
+        private boolean isLoadExclusiveCode(int asm) {
+            if ((asm & 0xbffffc00) == 0x885ffc00) { // ldaxr
+                return true;
+            }
+            if ((asm & 0xfffffc00) == 0x485ffc00) { // ldaxrh
+                return true;
+            }
+            if ((asm & 0xfffffc00) == 0x485f7c00) { // 0x40808dbc: ldxrh w5, [x1]
+                return true;
+            }
+            return (asm & 0xbffffc00) == 0x885f7c00; // ldxr
+        }
+        final void onSoftwareStep(long spsr, long address) {
+            UnidbgPointer pointer = UnidbgPointer.pointer(emulator, address);
+            assert pointer != null;
+            int asm = pointer.getInt(0);
+            if (isLoadExclusiveCode(asm)) {
+                if (loadExclusiveAddress == address) {
+                    loadExclusiveCount++;
+                } else {
+                    loadExclusiveCount = 0;
+                }
+                loadExclusiveAddress = address;
+            } else {
+                if (loadExclusiveAddress == 0) {
+                    resetRegionInfo();
+                }
+            }
+            if (loadExclusiveCount >= 2 && !exclusiveRegionAddressList.contains(address)) {
+                exclusiveRegionAddressList.add(address);
+            }
+            if (loadExclusiveCount >= 4 && address == loadExclusiveAddress) {
+                long foundAddress = 0;
+                StringBuilder builder = new StringBuilder();
+                for (long pc : exclusiveRegionAddressList) {
+                    Pointer ptr = UnidbgPointer.pointer(emulator, pc);
+                    assert ptr != null;
+                    byte[] code = ptr.getByteArray(0, 4);
+                    Instruction instruction = createDisassembler().disasm(code, pc, 1)[0];
+                    switch (instruction.getMnemonic()) {
+                        case "stxr":
+                        case "stlxr":
+                        case "stxrh":
+                        case "stlxrh":
+                            foundAddress = pc;
+                            break;
+                    }
+                    builder.append(String.format("0x%x: %s%n", instruction.getAddress(), instruction));
+                }
+                if (foundAddress == 0) {
+                    log.info("CodeHookNotifier.onSoftwareStep: \n" + builder);
+                } else {
+                    resetRegionInfo();
+                    final long breakAddress = foundAddress + 4;
+                    for (int i = 0; i < breakpoints.length; i++) {
+                        if (breakpoints[i] == null) {
+                            final int n = i;
+                            visitorStack.push(new ExceptionVisitor() {
+                                @Override
+                                public boolean onException(Hypervisor hypervisor, int ec, long address) {
+                                    if (ec == EC_BREAKPOINT) {
+                                        callback.notifyCallback(address);
+                                    }
+                                    breakpoints[n] = null;
+                                    hypervisor.disable_hw_breakpoint(n);
+                                    callback.onEscapeSuccess();
+                                    step();
+                                    return true;
+                                }
+                            });
+                            callback.notifyCallback(address);
+                            HypervisorBreakPoint bp = new HypervisorBreakPoint(n, breakAddress, null);
+                            bp.install(hypervisor);
+                            breakpoints[n] = bp;
+                            hypervisor.enable_single_step(false);
+                            hypervisor.reg_set_spsr_el1(spsr | Hypervisor.PSTATE$SS);
+                            return;
+                        }
+                    }
+                    log.warn("No more BKPs: " + breakpoints.length);
+                }
+            }
+            callback.notifyCallback(address);
+            hypervisor.reg_set_spsr_el1(spsr | Hypervisor.PSTATE$SS);
+        }
+    }
+
+    private class CodeHookNotifier implements UnHook, ExclusiveMonitorCallback {
+        private final CodeHook callback;
+        private final long begin;
+        private final long end;
+        private final Object user;
+        public CodeHookNotifier(CodeHook callback, long begin, long end, Object user) {
+            this.callback = callback;
+            this.begin = begin;
+            this.end = end;
+            this.user = user;
+        }
+        @Override
+        public void onEscapeSuccess() {
+            step();
+        }
+        @Override
+        public void notifyCallback(long address) {
+            if (begin >= end ||
+                    (address >= begin && address < end)) {
+                callback.hook(HypervisorBackend64.this, address, 4, user);
+            }
+        }
+        @Override
+        public void unhook() {
+            exclusiveMonitorEscaper = null;
+        }
+    }
+
+    private ExclusiveMonitorEscaper exclusiveMonitorEscaper;
+
+    @Override
+    public void hook_add_new(CodeHook callback, long begin, long end, Object user_data) throws BackendException {
+        if (exclusiveMonitorEscaper != null) {
+            throw new IllegalStateException();
+        }
+        CodeHookNotifier codeHookNotifier = new CodeHookNotifier(callback, begin, end, user_data);
+        this.exclusiveMonitorEscaper = new ExclusiveMonitorEscaper(codeHookNotifier);
+        callback.onAttach(codeHookNotifier);
+    }
+
+    private void onSoftwareStep(long esr, long address, long spsr) {
+        if (exclusiveMonitorEscaper != null) {
+            exclusiveMonitorEscaper.onSoftwareStep(spsr, address);
+            return;
+        }
+
+        if (singleStep <= 0) {
+            hypervisor.enable_single_step(false);
+            return;
+        }
         if (--singleStep == 0) {
             if (debugCallback != null) {
-                debugCallback.onBreak(this, elr, INS_SIZE, debugUserData);
+                debugCallback.onBreak(this, address, INS_SIZE, debugUserData);
             } else {
                 int status = (int) (esr & 0x3f);
                 interruptHookNotifier.notifyCallSVC(this, ARMEmulator.EXCP_BKPT, status);
             }
-        } else if (singleStep > 0) {
-            hypervisor.reg_set_spsr_el1(spsr | Hypervisor.PSTATE$SS);
         } else {
-            hypervisor.enable_single_step(false);
+            hypervisor.reg_set_spsr_el1(spsr | Hypervisor.PSTATE$SS);
         }
     }
 
-    private boolean handleCommRead(long vaddr, long elr) {
+    private boolean handleCommRead(long vaddr, long elr, int accessSize) {
         Pointer pointer = UnidbgPointer.pointer(emulator, vaddr);
         assert pointer != null;
         Pointer pc = UnidbgPointer.pointer(emulator, elr);
@@ -280,7 +563,10 @@ public class HypervisorBackend64 extends HypervisorBackend {
         }
         OpInfo opInfo = (OpInfo) insn.getOperands();
         if (opInfo.isUpdateFlags() || opInfo.isWriteBack() || !insn.getMnemonic().startsWith("ldr") || vaddr < _COMM_PAGE64_BASE_ADDRESS) {
-            throw new UnsupportedOperationException();
+            if (eventMemHookNotifier != null) {
+                eventMemHookNotifier.notifyDataAbort(false, accessSize, vaddr);
+            }
+            return false;
         }
         Operand[] op = opInfo.getOperands();
         int offset = (int) (vaddr - _COMM_PAGE64_BASE_ADDRESS);
@@ -290,7 +576,7 @@ public class HypervisorBackend64 extends HypervisorBackend {
             case 0x58: {
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getUnicornReg(), 0x0L);
+                reg_write(insn.mapToUnicornReg(value.getReg()), 0x0L);
                 hypervisor.reg_set_elr_el1(elr + 4);
                 return true;
             }
@@ -302,7 +588,7 @@ public class HypervisorBackend64 extends HypervisorBackend {
             case 0x90: {
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getUnicornReg(), 0x0);
+                reg_write(insn.mapToUnicornReg(value.getReg()), 0x0);
                 hypervisor.reg_set_elr_el1(elr + 4);
                 return true;
             }
@@ -312,7 +598,7 @@ public class HypervisorBackend64 extends HypervisorBackend {
             case 0x36: { // uint8_t number of logical CPUs (hw.logicalcpu_max)
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getUnicornReg(), 1);
+                reg_write(insn.mapToUnicornReg(value.getReg()), 1);
                 hypervisor.reg_set_elr_el1(elr + 4);
                 return true;
             }

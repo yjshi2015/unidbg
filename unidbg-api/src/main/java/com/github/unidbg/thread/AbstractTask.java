@@ -10,7 +10,7 @@ import java.util.List;
 
 abstract class AbstractTask extends BaseTask implements Task {
 
-    private final int id;
+    protected final int id;
 
     public AbstractTask(int id) {
         this.id = id;
@@ -70,4 +70,16 @@ abstract class AbstractTask extends BaseTask implements Task {
     public boolean setErrno(Emulator<?> emulator, int errno) {
         return false;
     }
+
+    @Override
+    protected final String getStatus() {
+        if (isFinish()) {
+            return "Finished";
+        } else if (canDispatch()) {
+            return "Runnable";
+        } else {
+            return "Paused";
+        }
+    }
+
 }

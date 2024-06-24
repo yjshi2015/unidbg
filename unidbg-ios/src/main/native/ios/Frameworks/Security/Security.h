@@ -1,5 +1,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #import "../frameworks.h"
+#import "../cf.h"
 
 #define errSecSuccess                                0;       /* No error. */
 #define errSecUnimplemented                          -4;      /* Function or operation not implemented. */
@@ -10,6 +11,7 @@ const CFStringRef kSecClass = CFSTR("class");
 const CFStringRef kSecAttrService = CFSTR("svce");
 const CFStringRef kSecAttrAccount = CFSTR("acct");
 const CFStringRef kSecAttrAccessibleAlwaysThisDeviceOnly = CFSTR("dku");
+const CFStringRef kSecAttrAccessibleAlways = CFSTR("dk");
 const CFStringRef kSecAttrAccessible = CFSTR("pdmn");
 const CFStringRef kSecReturnData = CFSTR("r_Data");
 const CFStringRef kSecMatchLimitAll = CFSTR("m_LimitAll");
@@ -28,15 +30,17 @@ const CFStringRef kSecAttrAccessibleWhenUnlockedThisDeviceOnly = CFSTR("aku");
 const CFStringRef kSecAttrSynchronizableAny = CFSTR("syna");
 const CFStringRef kSecReturnPersistentRef = CFSTR("r_PersistentRef");
 
+const CFStringRef kSecAttrKeyClass = CFSTR("kSecAttrKeyClass");
+const CFStringRef kSecAttrKeyClassPublic = CFSTR("kSecAttrKeyClassPublic");
+const CFStringRef kSecAttrKeyType = CFSTR("kSecAttrKeyType");
+const CFStringRef kSecAttrKeyTypeRSA = CFSTR("kSecAttrKeyTypeRSA");
+const CFStringRef kSecAttrKeyTypeEC = CFSTR("kSecAttrKeyTypeEC");
+const CFStringRef kSecAttrKeyTypeECSECPrimeRandom = CFSTR("kSecAttrKeyTypeECSECPrimeRandom");
+const CFStringRef kSecAttrKeySizeInBits = CFSTR("kSecAttrKeySizeInBits");
+
 typedef struct SecRandom {
 } *SecRandomRef;
 const SecRandomRef kSecRandomDefault = NULL;
-
-// Copied from CoreFoundation/CFRuntime.h.
-struct CFRuntimeBase {
-  void *opaque1;
-  void *opaque2;
-};
 
 typedef uint8_t DERByte;
 typedef size_t DERSize;
@@ -47,7 +51,7 @@ typedef struct {
 } DERItem;
 
 typedef struct SecCertificate {
-  struct CFRuntimeBase		_base;
+  CFRuntimeBase		_base;
   CFDataRef				data;
   DERItem				_der;			/* Entire certificate in DER form. */
 } *SecCertificateRef;

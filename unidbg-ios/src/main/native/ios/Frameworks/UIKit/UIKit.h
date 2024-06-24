@@ -28,6 +28,8 @@ const NSNotificationName UIDeviceBatteryStateDidChangeNotification = @"UIDeviceB
 const NSNotificationName UIAccessibilityDarkerSystemColorsStatusDidChangeNotification = @"UIAccessibilityDarkerSystemColorsStatusDidChangeNotification";
 const NSNotificationName UIContentSizeCategoryDidChangeNotification = @"UIContentSizeCategoryDidChangeNotification";
 const NSNotificationName UIDeviceBatteryLevelDidChangeNotification = @"UIDeviceBatteryLevelDidChangeNotification";
+const NSNotificationName UIKeyboardWillChangeFrameNotification = @"UIKeyboardWillChangeFrameNotification";
+const NSNotificationName UIKeyboardDidChangeFrameNotification = @"UIKeyboardDidChangeFrameNotification";
 
 NSString *const NSExtensionHostDidEnterBackgroundNotification = @"NSExtensionHostDidEnterBackgroundNotification";
 NSString *const NSExtensionHostDidBecomeActiveNotification = @"NSExtensionHostDidBecomeActiveNotification";
@@ -44,11 +46,13 @@ const UIScrollViewDecelerationRate UIScrollViewDecelerationRateFast = 0.0;
 typedef CGFloat UIWindowLevel;
 const UIWindowLevel UIWindowLevelNormal = 0.0;
 const UIWindowLevel UIWindowLevelStatusBar = 0.0;
+const UIWindowLevel UIWindowLevelAlert = 0.0;
 
 typedef double NSTimeInterval;
 const NSTimeInterval UIApplicationBackgroundFetchIntervalMinimum = 0.0;
 
-const size_t UIBackgroundTaskInvalid = 0;
+typedef NSUInteger UIBackgroundTaskIdentifier;
+const UIBackgroundTaskIdentifier UIBackgroundTaskInvalid = 0;
 
 typedef NSString *UIFontTextStyle;
 const UIFontTextStyle UIFontTextStyleSubheadline = @"UIFontTextStyleSubheadline";
@@ -119,6 +123,7 @@ typedef enum UIAccessibilityContrast : NSInteger {
 - (void)setFill;
 - (UIColor *)colorWithAlphaComponent:(CGFloat)alpha;
 - (UIColor *)initWithWhite:(CGFloat)white alpha:(CGFloat)alpha;
+- (UIColor *)initWithRed:(CGFloat)red green:(CGFloat)green blue:(CGFloat)blue alpha:(CGFloat)alpha;
 @end
 
 @interface UIImageAsset : NSObject
@@ -127,16 +132,26 @@ typedef enum UIAccessibilityContrast : NSInteger {
 @interface UIResponder : NSObject
 @end
 
+@interface UIScene : UIResponder
+@end
+
+@interface UIWindowScene : UIScene
+@end
+
 @interface UIGestureRecognizer : NSObject
 @end
 
-@interface UIView : UIResponder
+@interface CALayer : NSObject
+@end
+
+@interface UIView <UIAppearance> : UIResponder
 @property(nonatomic) BOOL accessibilityViewIsModal;
 @property(nonatomic, retain) UIColor *backgroundColor;
 @property(nonatomic) CGRect frame;
 @property(nonatomic, getter=isHidden) BOOL hidden;
 @property(nonatomic, readonly) UIView *superview;
 @property(nonatomic) UIViewAutoresizing autoresizingMask;
+@property(nonatomic, readonly, strong) CALayer *layer;
 - (id)initWithFrame:(CGRect)rect;
 - (void)setAccessibilityViewIsModal:(BOOL)flag;
 - (void)setOverrideUserInterfaceStyle:(UIUserInterfaceStyle)style;
@@ -151,12 +166,16 @@ typedef enum UIAccessibilityContrast : NSInteger {
 @interface UINavigationItem : NSObject
 @end
 
+@protocol UIViewControllerTransitionCoordinator
+@end
+
 @interface UIViewController : UIResponder
 @property(nonatomic, copy) NSString *title;
 @property(nonatomic, strong) UIView *view;
 @property(nonatomic, copy) NSString *nibName;
 @property(nonatomic, strong) NSBundle *nibBundle;
 @property(nonatomic, strong) UINavigationItem *navigationItem;
+@property(nonatomic, readonly) id<UIViewControllerTransitionCoordinator> transitionCoordinator;
 - (UIViewController *)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil;
 - (void)setExtendedLayoutIncludesOpaqueBars: (BOOL)flag;
 @end
@@ -164,6 +183,8 @@ typedef enum UIAccessibilityContrast : NSInteger {
 @interface UIWindow : UIView
 @property(nonatomic) UIWindowLevel windowLevel;
 @property(nonatomic, strong) UIViewController *rootViewController;
+@property(nonatomic, getter=isUserInteractionEnabled) BOOL userInteractionEnabled;
+@property(nonatomic, retain) UIWindowScene *windowScene;
 - (void)makeKeyAndVisible;
 @end
 
@@ -182,6 +203,11 @@ typedef enum UIBackgroundRefreshStatus : NSInteger {
     UIBackgroundRefreshStatusAvailable
 } UIBackgroundRefreshStatus;
 
+typedef enum UIUserInterfaceLayoutDirection : NSInteger {
+    UIUserInterfaceLayoutDirectionLeftToRight,
+    UIUserInterfaceLayoutDirectionRightToLeft
+} UIUserInterfaceLayoutDirection;
+
 @interface UIEvent : NSObject
 @end
 
@@ -193,6 +219,8 @@ typedef enum UIBackgroundRefreshStatus : NSInteger {
 @property(nonatomic, getter=isProtectedDataAvailable) BOOL protectedDataAvailable;
 @property(nonatomic) NSInteger applicationIconBadgeNumber;
 @property(nonatomic) UIBackgroundRefreshStatus backgroundRefreshStatus;
+@property(nonatomic) UIUserInterfaceLayoutDirection userInterfaceLayoutDirection;
+@property(nonatomic, retain) NSSet<UIScene *> *connectedScenes;
 
 + (UIApplication *)sharedApplication;
 
@@ -213,6 +241,10 @@ typedef enum UIBackgroundRefreshStatus : NSInteger {
 - (void)registerForRemoteNotifications;
 
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event;
+
+- (UIBackgroundTaskIdentifier)beginBackgroundTaskWithName:(NSString *)taskName expirationHandler:(void (^)(void))handler;
+
+- (BOOL)canOpenURL:(NSURL *)url;
 
 @end
 
@@ -291,6 +323,16 @@ typedef enum UIUserInterfaceIdiom : NSInteger {
 - (void) callWithInvocation: (NSTimerInvocation *) invocation;
 @end
 
+@interface NSIndexPath (Foundation)
++ (id)indexPathForRow:(NSInteger)row inSection:(NSInteger)section;
+@end
+
+@interface NSError (Foundation)
++ (id (^)(NSError *, NSErrorUserInfoKey))userInfoValueProviderForDomain:(NSErrorDomain)errorDomain;
++ (void)setUserInfoValueProviderForDomain:(NSErrorDomain)errorDomain
+                                 provider:(id (^)(NSError *err, NSErrorUserInfoKey userInfoKey))provider;
+@end
+
 @interface NSOperationQueue (Foundation)
 - (void) setQualityOfService: (NSQualityOfService) qualityOfService;
 - (void) setUnderlyingQueue: (dispatch_queue_t) queue;
@@ -300,9 +342,8 @@ typedef enum UIUserInterfaceIdiom : NSInteger {
 - (void)setLocalizedDateFormatFromTemplate:(NSString *)dateFormatTemplate;
 @end
 
-@interface NSURLSession (CFNetwork)
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration;
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration delegate:(id)delegate delegateQueue:(NSOperationQueue *)queue;
+@interface NSKeyedArchiver (Foundation)
+- (id)initRequiringSecureCoding:(BOOL)requiresSecureCoding;
 @end
 
 @interface UIScreen : NSObject
@@ -322,6 +363,7 @@ typedef enum UIUserInterfaceIdiom : NSInteger {
 @end
 
 id __NSArray0__;
+id __NSDictionary0__;
 
 @interface UICollectionReusableView : UIView
 @end
@@ -346,6 +388,7 @@ BOOL UIAccessibilityDarkerSystemColorsEnabled();
 
 @protocol UIAppearance
 + (id)appearanceWhenContainedInInstancesOfClasses:(NSArray<Class<UIAppearanceContainer>> *)containerTypes;
++ (id)appearance;
 @end
 
 @interface UIControl : UIView
@@ -360,4 +403,36 @@ BOOL UIAccessibilityDarkerSystemColorsEnabled();
 
 @interface UISearchBar : UIView
 @property(nonatomic, retain) UISearchTextField *searchTextField;
+@end
+
+@interface BRQuery : NSObject
+@end
+
+@interface NSConstantIntegerNumber : NSNumber {
+    const char *_encoding;
+    int64_t  _value;
+}
+- (const char *)objCType;
+- (bool)boolValue;
+- (BOOL)charValue;
+- (int)intValue;
+- (double)doubleValue;
+- (float)floatValue;
+- (long long)integerValue;
+- (long long)longLongValue;
+- (long long)longValue;
+- (short)shortValue;
+- (unsigned char)unsignedCharValue;
+- (unsigned int)unsignedIntValue;
+- (unsigned long long)unsignedIntegerValue;
+- (unsigned long long)unsignedLongLongValue;
+- (unsigned long long)unsignedLongValue;
+- (unsigned short)unsignedShortValue;
+@end
+
+typedef NSInteger LAPolicy;
+
+@interface LAContext : NSObject
+- (BOOL) canEvaluatePolicy:(LAPolicy) policy
+                     error:(NSError * *) error;
 @end

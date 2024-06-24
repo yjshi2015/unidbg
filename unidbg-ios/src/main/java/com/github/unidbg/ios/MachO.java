@@ -20,6 +20,7 @@ public interface MachO {
     int N_TYPE = 0x0e;
     int N_STAB = 0xe0;
     int N_UNDF = 0; /* undefined, n_sect == NO_SECT */
+    int N_EXT = 0x1; /* external symbol bit, set for external symbols */
     int N_ABS = 0x2; /* absolute, n_sect == NO_SECT */
     int N_SECT = 0xe; /* defined in section number n_sect */
     int N_INDR = 0xa; /* indirect */
@@ -54,7 +55,7 @@ public interface MachO {
     int REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB = 0x80;
 
     int BIND_IMMEDIATE_MASK = 0x0f;
-    int BIND_OPCODE_MASK = 0xf0;
+    byte BIND_OPCODE_MASK = (byte) 0xf0;
     int BIND_OPCODE_DONE = 0x00;
     int BIND_OPCODE_SET_DYLIB_ORDINAL_IMM = 0x10;
     int BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB = 0x20;
@@ -98,5 +99,8 @@ public interface MachO {
     byte BIND_SPECIAL_DYLIB_SELF = 0;
     byte BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE = -1;
     byte BIND_SPECIAL_DYLIB_FLAT_LOOKUP = -2;
+    byte BIND_SPECIAL_DYLIB_WEAK_LOOKUP = -3;
+
+    int MH_WEAK_DEFINES = 0x8000; /* the final linked image contains external weak symbols */
 
 }

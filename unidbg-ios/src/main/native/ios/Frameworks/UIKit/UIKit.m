@@ -72,6 +72,8 @@ int UIApplicationMain(int argc, char *argv[], NSString *principalClassName, NSSt
     [carrier setCarrierName: [_carrierName retain]];
   }
 
+  NSUserDefaults *userDefault = [NSUserDefaults standardUserDefaults];
+  [userDefault setBool: YES forKey: @"NSFileCoordinatorDoesNothing"];
   NSNumber *callFinishLaunchingWithOptions = dict[@"callFinishLaunchingWithOptions"];
   if(delegate && [callFinishLaunchingWithOptions boolValue]) {
     UIApplication *application;
@@ -151,6 +153,9 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
 + (UIColor *)blackColor {
     return [UIColor new];
 }
++ (UIColor *)colorNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
+    return [UIColor new];
+}
 - (UIColor *)initWithDynamicProvider:(UIColor * (^)(UITraitCollection *traitCollection))dynamicProvider {
     return dynamicProvider([UITraitCollection new]);
 }
@@ -172,12 +177,21 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
 - (UIColor *)initWithWhite:(CGFloat)white alpha:(CGFloat)alpha {
     return [UIColor new];
 }
+- (UIColor *)initWithRed:(CGFloat)red green:(CGFloat)green blue:(CGFloat)blue alpha:(CGFloat)alpha {
+    return [UIColor new];
+}
 @end
 
 @implementation UIGestureRecognizer
 @end
 
+@implementation CALayer
+@end
+
 @implementation UIView
++ (id)appearance {
+  return nil;
+}
 - (id)initWithFrame:(CGRect)rect {
     if(self = [super init]) {
         self.frame = rect;
@@ -232,6 +246,12 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
 @implementation UIEvent
 @end
 
+@implementation UIScene
+@end
+
+@implementation UIWindowScene
+@end
+
 static UIApplication *sharedApplication;
 
 @implementation UIApplication
@@ -251,6 +271,8 @@ static UIApplication *sharedApplication;
         self.statusBarHidden = YES;
         self.protectedDataAvailable = YES;
         self.backgroundRefreshStatus = UIBackgroundRefreshStatusRestricted;
+        self.userInterfaceLayoutDirection = UIUserInterfaceLayoutDirectionLeftToRight;
+        self.connectedScenes = nil;
     }
     sharedApplication = self;
     return self;
@@ -288,9 +310,18 @@ static UIApplication *sharedApplication;
 }
 
 - (void)registerForRemoteNotifications {
+    NSLog(@"registerForRemoteNotifications delegate=%@", delegate);
 }
 
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
+    return NO;
+}
+
+- (UIBackgroundTaskIdentifier)beginBackgroundTaskWithName:(NSString *)taskName expirationHandler:(void (^)(void))handler {
+    return UIBackgroundTaskInvalid;
+}
+
+- (BOOL)canOpenURL:(NSURL *)url {
     return NO;
 }
 
@@ -400,6 +431,21 @@ static UIApplication *sharedApplication;
 }
 @end
 
+@implementation NSIndexPath (Foundation)
++ (id)indexPathForRow:(NSInteger)row inSection:(NSInteger)section {
+  return nil;
+}
+@end
+
+@implementation NSError (Foundation)
++ (id (^)(NSError *, NSErrorUserInfoKey))userInfoValueProviderForDomain:(NSErrorDomain)errorDomain {
+  return nil;
+}
++ (void)setUserInfoValueProviderForDomain:(NSErrorDomain)errorDomain
+                                 provider:(id (^)(NSError *err, NSErrorUserInfoKey userInfoKey))provider {
+}
+@end
+
 @implementation NSOperationQueue (Foundation)
 - (void) setQualityOfService: (NSQualityOfService) qualityOfService {
 }
@@ -411,13 +457,9 @@ static UIApplication *sharedApplication;
 - (void)setLocalizedDateFormatFromTemplate:(NSString *)dateFormatTemplate {
 }
 @end
-
-@implementation NSURLSession (CFNetwork)
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration {
-  return [NSURLSession new];
-}
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration delegate:(id)delegate delegateQueue:(NSOperationQueue *)queue {
-  return [NSURLSession new];
+@implementation NSKeyedArchiver (Foundation)
+- (id)initRequiringSecureCoding:(BOOL)requiresSecureCoding {
+    return nil;
 }
 @end
 #pragma clang diagnostic pop
@@ -450,8 +492,10 @@ static UIApplication *sharedApplication;
   return image;
 }
 + (UIImage *)imageNamed:(NSString *)name {
-  UIImage *image = [UIImage new];
-  return image;
+  return nil;
+}
++ (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
+  return nil;
 }
 - (UIImage *)resizableImageWithCapInsets:(UIEdgeInsets)capInsets {
   return self;
@@ -557,6 +601,9 @@ BOOL UIAccessibilityDarkerSystemColorsEnabled() {
 @end
 
 @implementation UITextField
++ (id)appearance {
+  return nil;
+}
 + (UITextField *)appearanceWhenContainedInInstancesOfClasses:(NSArray<Class<UIAppearanceContainer>> *)containerTypes {
     return [UITextField new];
 }
@@ -568,7 +615,71 @@ BOOL UIAccessibilityDarkerSystemColorsEnabled() {
 }
 @end
 
+@implementation BRQuery
+@end
+
+@implementation NSConstantIntegerNumber
+- (const char *)objCType {
+  return self->_encoding;
+}
+- (bool)boolValue {
+  return self->_value == 1 ? YES : NO;
+}
+- (BOOL)charValue {
+  return (BOOL) self->_value;
+}
+- (int)intValue {
+  return (int) self->_value;
+}
+- (long long)integerValue {
+  return (long long) self->_value;
+}
+- (long long)longLongValue {
+  return (long long) self->_value;
+}
+- (long long)longValue {
+  return (long long) self->_value;
+}
+- (short)shortValue {
+  return (short) self->_value;
+}
+- (unsigned char)unsignedCharValue {
+  return (unsigned char) self->_value;
+}
+- (unsigned int)unsignedIntValue {
+  return (unsigned int) self->_value;
+}
+- (unsigned long long)unsignedIntegerValue {
+  return (unsigned long long) self->_value;
+}
+- (unsigned long long)unsignedLongLongValue {
+  return (unsigned long long) self->_value;
+}
+- (unsigned long long)unsignedLongValue {
+  return (unsigned long long) self->_value;
+}
+- (unsigned short)unsignedShortValue {
+  return (unsigned short) self->_value;
+}
+- (double)doubleValue {
+  [self doesNotRecognizeSelector:_cmd];
+  return 0.0;
+}
+- (float)floatValue {
+  [self doesNotRecognizeSelector:_cmd];
+  return 0.0;
+}
+@end
+
+@implementation LAContext
+- (BOOL) canEvaluatePolicy:(LAPolicy) policy
+                     error:(NSError * *) error {
+  return TRUE;
+}
+@end
+
 __attribute__((constructor))
 void init() {
   __NSArray0__ = [NSArray array];
+  __NSDictionary0__ = [NSDictionary dictionary];
 }

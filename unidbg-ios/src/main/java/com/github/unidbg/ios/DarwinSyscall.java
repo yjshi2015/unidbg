@@ -50,9 +50,11 @@ public interface DarwinSyscall {
     int HW_PAGESIZE = 7; /* int: software page size */
     int HW_CPU_FREQ =	15; /* int: CPU Frequency */
     int HW_MEMSIZE =	24;		/* uint64_t: physical ram size */
+    int HW_AVAILCPU = 25;		/* int: number of available CPUs */
     int HW_CPU_TYPE = 105;
     int HW_CPU_SUBTYPE = 106;
     int HW_CPU_FAMILY = 108;
+    int HW_CPU_MAX = 0x8000;
 
     int KERN_PROC_PID = 1; /* by process id */
 
@@ -65,5 +67,10 @@ public interface DarwinSyscall {
     int STATIC_PORT = 0x88;
 
     int ETIMEDOUT = 60; /* Operation timed out */
+
+    long nanoTime = System.nanoTime();
+    int CLOCK_REALTIME = 0;
+    int CLOCK_MONOTONIC_RAW = 4;
+    int CLOCK_MONOTONIC = 6;
 
 }

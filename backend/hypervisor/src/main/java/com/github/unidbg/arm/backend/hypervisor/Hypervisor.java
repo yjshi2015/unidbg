@@ -9,6 +9,8 @@ public class Hypervisor implements Closeable {
 
     private static final Log log = LogFactory.getLog(Hypervisor.class);
 
+    public static native void testVcpu();
+
     public static final long REG_VBAR_EL1 = 0xf0000000L;
     public static final long PSTATE$SS = 1 << 21;
 
@@ -84,16 +86,10 @@ public class Hypervisor implements Closeable {
     }
     private static native void disable_hw_breakpoint(long handle, int n);
 
-    public void install_watchpoint(int n, long start, long end, boolean isWrite) {
-        long dbgwcr = 0x25;
-        if (isWrite) {
-            dbgwcr |= 0b10 << 3;
-        } else {
-            dbgwcr |= 0b01 << 3;
-        }
-        install_watchpoint(nativeHandle, n, dbgwcr, start);
+    public void install_watchpoint(int n, long dbgwvr, long dbgwcr) {
+        install_watchpoint(nativeHandle, n, dbgwcr, dbgwvr);
         if (log.isDebugEnabled()) {
-            log.debug("install_watchpoint n=" + n + ", start=0x" + Long.toHexString(start) + ", end=0x" + Long.toHexString(end) + ", dbgwcr=0x" + Long.toHexString(dbgwcr));
+            log.debug("install_watchpoint n=" + n + ", dbgwvr=0x" + Long.toHexString(dbgwvr) + ", dbgwcr=0x" + Long.toHexString(dbgwcr));
         }
     }
     public void disable_watchpoint(int n) {

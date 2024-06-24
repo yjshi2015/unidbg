@@ -1,5 +1,6 @@
 package com.github.unidbg.hook;
 
+import com.github.unidbg.AbstractEmulator;
 import com.github.unidbg.Emulator;
 import com.github.unidbg.Symbol;
 import com.github.unidbg.arm.Arm64Svc;
@@ -9,8 +10,12 @@ import com.github.unidbg.ios.hook.FishHook;
 import com.github.unidbg.ios.hook.Substrate;
 import com.github.unidbg.memory.SvcMemory;
 import com.sun.jna.Pointer;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 public class HookLoader extends BaseHook {
+
+    private static final Log log = LogFactory.getLog(HookLoader.class);
 
     public static HookLoader load(Emulator<?> emulator) {
         Substrate.getInstance(emulator); // load substrate first
@@ -91,9 +96,10 @@ public class HookLoader extends BaseHook {
         Pointer dq = context.getPointerArg(0);
         Pointer block = context.getPointerArg(1);
         Pointer fun = block.getPointer(0x10);
-        boolean dispatch = callback.canDispatch(dq, fun);
-        if (!dispatch) {
-            System.out.println("Skip dispatch_async dq=" + dq + ", fun=" + fun);
+        boolean is_barrier_async = context.getIntArg(2) != 0;
+        boolean dispatch = callback.canDispatch(emulator, dq, fun, is_barrier_async);
+        if (!dispatch && (log.isDebugEnabled() || LogFactory.getLog(AbstractEmulator.class).isDebugEnabled())) {
+            System.err.println("Skip dispatch_async dq=" + dq + ", fun=" + fun);
         }
         return dispatch ? 1 : 0;
     }

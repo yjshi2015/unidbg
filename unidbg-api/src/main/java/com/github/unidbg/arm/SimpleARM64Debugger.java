@@ -52,7 +52,7 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                 nextAddress = disassemble(emulator, address, size, false);
             }
         } catch (BackendException e) {
-            e.printStackTrace();
+            e.printStackTrace(System.err);
         }
 
         Scanner scanner = new Scanner(System.in);
@@ -85,7 +85,11 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                     continue;
                 }
                 if (line.startsWith("d0x")) {
-                    disassembleBlock(emulator, Long.parseLong(line.substring(3), 16), false);
+                    if (line.endsWith("L")) {
+                        line = line.substring(0, line.length() - 1);
+                    }
+                    long da = Long.parseLong(line.substring(3), 16);
+                    disassembleBlock(emulator, da & 0xfffffffffffffffcL, false);
                     continue;
                 }
                 if (line.startsWith("m")) {
@@ -126,7 +130,11 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                         reg = Arm64Const.UC_ARM64_REG_SP;
                         name = "sp";
                     } else if (command.startsWith("m0x")) {
-                        long addr = Long.parseLong(command.substring(3).trim(), 16);
+                        String hex = command.substring(3).trim();
+                        if (hex.endsWith("L")) {
+                            hex = hex.substring(0, hex.length() - 1);
+                        }
+                        long addr = Long.parseLong(hex, 16);
                         Pointer pointer = UnidbgPointer.pointer(emulator, addr);
                         if (pointer != null) {
                             dumpMemory(pointer, length, pointer.toString(), stringType);
@@ -151,7 +159,11 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                 }
                 if (line.startsWith("wx0x")) {
                     String[] tokens = line.split("\\s+");
-                    long addr = Long.parseLong(tokens[0].substring(4).trim(), 16);
+                    String hex = tokens[0].substring(4).trim();
+                    if (hex.endsWith("L")) {
+                        hex = hex.substring(0, hex.length() - 1);
+                    }
+                    long addr = Long.parseLong(hex, 16);
                     Pointer pointer = UnidbgPointer.pointer(emulator, addr);
                     if (pointer != null && tokens.length > 1) {
                         byte[] data = Hex.decodeHex(tokens[1].toCharArray());
@@ -176,7 +188,7 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                         String str = tokens[1];
                         value = Utils.parseNumber(str);
                     } catch(NumberFormatException e) {
-                        e.printStackTrace();
+                        e.printStackTrace(System.err);
                         continue;
                     }
 
@@ -193,7 +205,11 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                     } else if ("wsp".equals(command)) {
                         reg = Arm64Const.UC_ARM64_REG_SP;
                     } else if (command.startsWith("wb0x") || command.startsWith("ws0x") || command.startsWith("wi0x") || command.startsWith("wl0x")) {
-                        long addr = Long.parseLong(command.substring(4).trim(), 16);
+                        String hex = command.substring(4).trim();
+                        if (hex.endsWith("L")) {
+                            hex = hex.substring(0, hex.length() - 1);
+                        }
+                        long addr = Long.parseLong(hex, 16);
                         Pointer pointer = UnidbgPointer.pointer(emulator, addr);
                         if (pointer != null) {
                             if (command.startsWith("wb")) {
@@ -221,12 +237,15 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                     try {
                         emulator.getUnwinder().unwind();
                     } catch (Throwable e) {
-                        e.printStackTrace();
+                        e.printStackTrace(System.err);
                     }
                     continue;
                 }
                 if (line.startsWith("b0x")) {
                     try {
+                        if (line.endsWith("L")) {
+                            line = line.substring(0, line.length() - 1);
+                        }
                         long addr = Long.parseLong(line.substring(3), 16) & 0xfffffffffffffffeL;
                         Module module = null;
                         if (addr < Memory.MMAP_BASE && (module = findModuleByAddress(emulator, address)) != null) {
@@ -267,7 +286,7 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
                     break;
                 }
             } catch (RuntimeException | DecoderException e) {
-                e.printStackTrace();
+                e.printStackTrace(System.err);
             }
         }
     }

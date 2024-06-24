@@ -142,7 +142,7 @@ public class ElfSegment {
 				protected PtLoadData computeValue() throws ElfException {
 					parser.seek(ElfSegment.this.offset);
 					ByteBuffer buffer = parser.readBuffer((int) file_size);
-					return new PtLoadData(buffer);
+					return new PtLoadData(buffer, file_size);
 				}
 			};
 			break;
@@ -158,7 +158,10 @@ public class ElfSegment {
 			ehFrameHeader = new MemoizedObject<GnuEhFrameHeader>() {
 				@Override
 				protected GnuEhFrameHeader computeValue() throws ElfException, IOException {
-					return new GnuEhFrameHeader(parser, elfFile.virtualMemoryAddrToFileOffset(virtual_address), (int) mem_size);
+					if (mem_size <= 0 || virtual_address <= 0) {
+						return null;
+					}
+					return new GnuEhFrameHeader(parser, elfFile.virtualMemoryAddrToFileOffset(virtual_address), (int) mem_size, virtual_address);
 				}
 			};
 			break;

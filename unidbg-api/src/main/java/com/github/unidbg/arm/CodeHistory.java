@@ -1,9 +1,9 @@
 package com.github.unidbg.arm;
 
-import capstone.Capstone;
 import capstone.api.Instruction;
 import com.github.unidbg.Emulator;
 import com.github.unidbg.arm.backend.Backend;
+import com.github.unidbg.arm.backend.BackendException;
 
 public class CodeHistory {
 
@@ -16,14 +16,16 @@ public class CodeHistory {
         this.thumb = thumb;
     }
 
-    Instruction disassemble(Emulator<?> emulator) {
-        Backend backend = emulator.getBackend();
-        byte[] code = backend.mem_read(address, size);
-        Instruction[] insns = emulator.disassemble(address, code, thumb, 1);
-        if (insns.length == 0) {
+    Instruction[] disassemble(Emulator<?> emulator) {
+        if (size <= 1) {
             return null;
-        } else {
-            return insns[0];
+        }
+        Backend backend = emulator.getBackend();
+        try {
+            byte[] code = backend.mem_read(address, size);
+            return emulator.disassemble(address, code, thumb, 0);
+        } catch(BackendException e) {
+            return null;
         }
     }
 

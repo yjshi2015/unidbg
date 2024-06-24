@@ -35,3 +35,9 @@
     return YES;
 }
 @end
+
+@implementation NSManagedObject
++ (id)fetchRequest {
+    return nil;
+}
+@end

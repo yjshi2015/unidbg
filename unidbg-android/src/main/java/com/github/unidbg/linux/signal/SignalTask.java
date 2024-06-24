@@ -50,6 +50,8 @@ public class SignalTask extends AbstractSignalTask {
         }
     }
 
+    private MemoryBlock ucontext;
+
     private Number runHandler(AbstractEmulator<?> emulator) {
         Backend backend = emulator.getBackend();
         if (stack == null) {
@@ -60,25 +62,28 @@ public class SignalTask extends AbstractSignalTask {
             infoBlock.getPointer().setInt(0, signum);
             sig_info = infoBlock.getPointer();
         }
+        if (ucontext == null) {
+            ucontext = emulator.getMemory().malloc(0x1000, true);
+        }
         if (emulator.is32Bit()) {
             backend.reg_write(ArmConst.UC_ARM_REG_SP, stack.peer);
             backend.reg_write(ArmConst.UC_ARM_REG_R0, signum);
-            backend.reg_write(ArmConst.UC_ARM_REG_R1, sig_info == null ? 0 : UnidbgPointer.nativeValue(sig_info)); // siginfo_t *info
-            backend.reg_write(ArmConst.UC_ARM_REG_R2, 0); // void *ucontext
+            backend.reg_write(ArmConst.UC_ARM_REG_R1, UnidbgPointer.nativeValue(sig_info)); // siginfo_t *info
+            backend.reg_write(ArmConst.UC_ARM_REG_R2, UnidbgPointer.nativeValue(ucontext.getPointer()));
             backend.reg_write(ArmConst.UC_ARM_REG_LR, emulator.getReturnAddress());
         } else {
             backend.reg_write(Arm64Const.UC_ARM64_REG_SP, stack.peer);
             backend.reg_write(Arm64Const.UC_ARM64_REG_X0, signum);
-            backend.reg_write(Arm64Const.UC_ARM64_REG_X1, sig_info == null ? 0 : UnidbgPointer.nativeValue(sig_info)); // siginfo_t *info
-            backend.reg_write(Arm64Const.UC_ARM64_REG_X2, 0); // void *ucontext
+            backend.reg_write(Arm64Const.UC_ARM64_REG_X1, UnidbgPointer.nativeValue(sig_info)); // siginfo_t *info
+            backend.reg_write(Arm64Const.UC_ARM64_REG_X2, UnidbgPointer.nativeValue(ucontext.getPointer()));
             backend.reg_write(Arm64Const.UC_ARM64_REG_LR, emulator.getReturnAddress());
         }
         return emulator.emulate(action.getSaHandler(), emulator.getReturnAddress());
     }
 
     @Override
-    public String toString() {
-        return "SignalTask sa_handler=" + action.getSaHandler() + ", stack=" + stack + ", signum=" + signum;
+    public String toThreadString() {
+        return "SignalTask sa_handler=0x" + Long.toHexString(action.getSaHandler()) + ", stack=" + stack + ", signum=" + signum;
     }
 
     private MemoryBlock infoBlock;
@@ -87,6 +92,10 @@ public class SignalTask extends AbstractSignalTask {
     public void destroy(Emulator<?> emulator) {
         super.destroy(emulator);
 
+        if (ucontext != null) {
+            ucontext.free();
+            ucontext = null;
+        }
         if (infoBlock != null) {
             infoBlock.free();
             infoBlock = null;

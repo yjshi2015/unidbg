@@ -17,10 +17,10 @@ import com.github.unidbg.arm.backend.BackendException;
 import com.github.unidbg.arm.context.Arm32RegisterContext;
 import com.github.unidbg.arm.context.Arm64RegisterContext;
 import com.github.unidbg.file.FileIO;
+import com.github.unidbg.file.IOResolver;
 import com.github.unidbg.file.ios.DarwinFileIO;
 import com.github.unidbg.file.ios.IOConstants;
 import com.github.unidbg.hook.HookListener;
-import com.github.unidbg.ios.patch.LibDispatchPatcher;
 import com.github.unidbg.ios.patch.LibDyldPatcher;
 import com.github.unidbg.ios.struct.kernel.Pthread;
 import com.github.unidbg.ios.struct.kernel.Pthread32;
@@ -92,13 +92,14 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
         setStackPoint(stackBase);
         initializeTSD(envs);
-
-        addModuleListener(new LibDispatchPatcher());
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public void setLibraryResolver(LibraryResolver libraryResolver) {
-        syscallHandler.addIOResolver((DarwinResolver) libraryResolver);
+        if (libraryResolver instanceof IOResolver) {
+            syscallHandler.addIOResolver((IOResolver<DarwinFileIO>) libraryResolver);
+        }
         super.setLibraryResolver(libraryResolver);
 
         /*
@@ -172,15 +173,13 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         vars.setPointer(3L * emulator.getPointerSize(), _NSGetEnviron);
         vars.setPointer(4L * emulator.getPointerSize(), _NSGetProgname);
 
-        addModuleListener(new LibDyldPatcher(_NSGetArgc, _NSGetArgv, _NSGetEnviron, _NSGetProgname));
-
         final Pointer thread = allocateStack(UnidbgStructure.calculateSize(emulator.is64Bit() ? Pthread64.class : Pthread32.class)); // reserve space for pthread_internal_t
         Pthread pthread = Pthread.create(emulator, thread);
 
         /* 0xa4必须固定，否则初始化objc会失败 */
         final UnidbgPointer tsd = pthread.getTSD(); // tsd size
         assert tsd != null;
-        tsd.setPointer(__TSD_THREAD_SELF * emulator.getPointerSize(), thread);
+        tsd.setPointer(__TSD_THREAD_SELF, thread);
         tsd.setPointer(__TSD_ERRNO * emulator.getPointerSize(), errno);
         tsd.setPointer(__TSD_MIG_REPLY * emulator.getPointerSize(), null);
 
@@ -197,11 +196,13 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         if (log.isDebugEnabled()) {
             log.debug("initializeTSD tsd=" + tsd + ", thread=" + thread + ", environ=" + environ + ", vars=" + vars + ", sp=0x" + Long.toHexString(getStackPoint()) + ", errno=" + errno);
         }
+
+        addModuleListener(new LibDyldPatcher(_NSGetArgc, _NSGetArgv, _NSGetEnviron, _NSGetProgname));
     }
 
     public final void onExecutableLoaded(String executable) {
         if (callInitFunction) {
-            for (MachOModule m : modules.values()) {
+            for (MachOModule m : modules.values().toArray(new MachOModule[0])) {
                 boolean needCallInit = m.allSymbolBound || isPayloadModule(m) || m.getPath().equals(executable);
                 if (needCallInit) {
                     m.doInitialization(emulator);
@@ -220,7 +221,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
     }
 
     private MachOModule loadInternal(LibraryFile libraryFile, boolean forceCallInit, boolean checkBootstrap) throws IOException {
-        MachOModule module = loadInternalPhase(libraryFile, true, checkBootstrap, Collections.<String>emptyList());
+        MachOModule module = loadInternalPhase(libraryFile, true, checkBootstrap, Collections.emptyList());
 
         for (MachOModule export : modules.values().toArray(new MachOModule[0])) {
             for (NeedLibrary library : export.lazyLoadNeededList.toArray(new NeedLibrary[0])) {
@@ -231,12 +232,19 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
                 MachOModule loaded = modules.get(FilenameUtils.getName(neededLibrary));
                 if (loaded != null) {
+                    if (library.upward) {
+                        export.upwardLibraries.put(FilenameUtils.getBaseName(neededLibrary), loaded);
+                    }
                     continue;
                 }
-                LibraryFile neededLibraryFile = resolveLibrary(libraryFile, neededLibrary, Collections.<String>emptySet());
+                LibraryFile neededLibraryFile = resolveLibrary(libraryFile, neededLibrary, Collections.singletonList(FilenameUtils.getFullPath(libraryFile.getPath())));
                 if (neededLibraryFile != null) {
-                    MachOModule needed = loadInternalPhase(neededLibraryFile, true, false, Collections.<String>emptySet());
+                    MachOModule needed = loadInternalPhase(neededLibraryFile, true, false, Collections.emptySet());
                     needed.addReferenceCount();
+
+                    if (library.upward) {
+                        export.upwardLibraries.put(FilenameUtils.getBaseName(needed.name), needed);
+                    }
                 } else if (!library.weak) {
                     log.info(export.getPath() + " load dependency " + neededLibrary + " failed");
                 }
@@ -246,6 +254,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
         for (MachOModule m : modules.values()) {
             processBind(m);
+
+            m.callObjcNotifyMapped(_objcNotifyMapped);
         }
 
         notifySingle(Dyld.dyld_image_state_bound, module);
@@ -258,12 +268,13 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     continue;
                 }
                 if (m.allSymbolBound || forceCallInit) {
+                    m.callObjcNotifyInit(_objcNotifyInit);
                     m.doInitialization(emulator);
                 }
             }
         }
 
-        for (MachOModule m : modules.values()) {
+        for (MachOModule m : modules.values().toArray(new MachOModule[0])) {
             notifySingle(Dyld.dyld_image_state_initialized, m);
         }
 
@@ -350,13 +361,18 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
         if (checkBootstrap && !isExecutable && executableModule == null) {
             URL url = getClass().getResource(objcRuntime ? "/ios/bootstrap_objc" : "/ios/bootstrap");
-            loadInternal(new URLibraryFile(url, "unidbg_bootstrap", DarwinResolver.LIB_VERSION, Collections.<String>emptyList()), false, false);
+            String path = "unidbg_bootstrap";
+            if (libraryFile instanceof DarwinLibraryFile) {
+                path = ((DarwinLibraryFile) libraryFile).resolveBootstrapPath();
+            }
+            loadInternal(new URLibraryFile(url, path, null), false, false);
         }
 
         long start = System.currentTimeMillis();
         long size = 0;
         String dyId = libraryFile.getName();
         MachO.DyldInfoCommand dyldInfoCommand = null;
+        MachO.LinkeditDataCommand chainedFixups = null;
         MachOModule subModule = null;
         boolean finalSegment = false;
         Set<String> rpathSet = new LinkedHashSet<>(2);
@@ -375,6 +391,12 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                         throw new IllegalStateException("dyldInfoCommand=" + dyldInfoCommand);
                     }
                     dyldInfoCommand = (MachO.DyldInfoCommand) command.body();
+                    break;
+                case DYLD_CHAINED_FIXUPS:
+                    if (chainedFixups != null) {
+                        throw new IllegalStateException("chainedFixups=" + chainedFixups);
+                    }
+                    chainedFixups = (MachO.LinkeditDataCommand) command.body();
                     break;
                 case SEGMENT: {
                     MachO.SegmentCommand segmentCommand = (MachO.SegmentCommand) command.body();
@@ -488,15 +510,17 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                 case ROUTINES_64:
                 case LOAD_WEAK_DYLIB:
                 case BUILD_VERSION:
+                case DYLD_EXPORTS_TRIE:
                     break;
                 case SUB_CLIENT:
                     MachO.SubCommand subCommand = (MachO.SubCommand) command.body();
                     String name = subCommand.name().value();
                     MachOModule module = (MachOModule) findModule(name);
                     if (module == null) {
-                        throw new IllegalStateException("Find sub client failed: " + name);
+                        log.debug("Find sub client failed: " + name);
+                    } else {
+                        subModule = module;
                     }
-                    subModule = module;
                     break;
                 case RPATH:
                     MachO.RpathCommand rpathCommand = (MachO.RpathCommand) command.body();
@@ -544,7 +568,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     MachO.SegmentCommand segmentCommand = (MachO.SegmentCommand) command.body();
                     long begin = loadBase + segmentCommand.vmaddr();
                     if ("__PAGEZERO".equals(segmentCommand.segname())) {
-                        regions.add(new MemRegion(begin, begin + segmentCommand.vmsize(), 0, libraryFile, segmentCommand.vmaddr()));
+                        segments.add(new Segment(segmentCommand.vmaddr(), segmentCommand.vmsize(), segmentCommand.fileoff(), segmentCommand.filesize()));
+                        regions.add(new MemRegion(begin, begin, begin + segmentCommand.vmsize(), 0, libraryFile, segmentCommand.vmaddr()));
                         break;
                     }
 
@@ -556,7 +581,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     }
 
                     if (segmentCommand.vmsize() == 0) {
-                        regions.add(new MemRegion(begin, begin, 0, libraryFile, segmentCommand.vmaddr()));
+                        regions.add(new MemRegion(begin, begin, begin, 0, libraryFile, segmentCommand.vmaddr()));
                         break;
                     }
                     int prot = get_segment_protection(segmentCommand.initprot());
@@ -570,14 +595,15 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     Alignment alignment = this.mem_map(begin, segmentCommand.vmsize(), prot, dyId, emulator.getPageAlign());
                     write_mem((int) segmentCommand.fileoff(), (int) segmentCommand.filesize(), begin, buffer);
 
-                    regions.add(new MemRegion(alignment.address, alignment.address + alignment.size, prot, libraryFile, segmentCommand.vmaddr()));
+                    regions.add(new MemRegion(begin, alignment.address, alignment.address + alignment.size, prot, libraryFile, segmentCommand.vmaddr()));
                     break;
                 }
                 case SEGMENT_64: {
                     MachO.SegmentCommand64 segmentCommand64 = (MachO.SegmentCommand64) command.body();
                     long begin = loadBase + segmentCommand64.vmaddr();
                     if ("__PAGEZERO".equals(segmentCommand64.segname())) {
-                        regions.add(new MemRegion(begin, begin + segmentCommand64.vmsize(), 0, libraryFile, segmentCommand64.vmaddr()));
+                        segments.add(new Segment(segmentCommand64.vmaddr(), segmentCommand64.vmsize(), segmentCommand64.fileoff(), segmentCommand64.filesize()));
+                        regions.add(new MemRegion(begin, begin, begin + segmentCommand64.vmsize(), 0, libraryFile, segmentCommand64.vmaddr()));
                         break;
                     }
 
@@ -602,7 +628,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     }
 
                     if (segmentCommand64.vmsize() == 0) {
-                        regions.add(new MemRegion(begin, begin, 0, libraryFile, segmentCommand64.vmaddr()));
+                        regions.add(new MemRegion(begin, begin, begin, 0, libraryFile, segmentCommand64.vmaddr()));
                         break;
                     }
                     int prot = get_segment_protection(segmentCommand64.initprot());
@@ -619,30 +645,34 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     }
                     write_mem((int) segmentCommand64.fileoff(), (int) segmentCommand64.filesize(), begin, buffer);
 
-                    regions.add(new MemRegion(alignment.address, alignment.address + alignment.size, prot, libraryFile, segmentCommand64.vmaddr()));
+                    regions.add(new MemRegion(begin, alignment.address, alignment.address + alignment.size, prot, libraryFile, segmentCommand64.vmaddr()));
                     break;
                 }
-                case LOAD_DYLIB:
+                case LOAD_DYLIB: {
                     MachO.DylibCommand dylibCommand = (MachO.DylibCommand) command.body();
                     ordinalList.add(dylibCommand.name());
                     neededList.add(new NeedLibrary(dylibCommand.name(), false, false));
                     break;
-                case LOAD_WEAK_DYLIB:
-                    dylibCommand = (MachO.DylibCommand) command.body();
+                }
+                case LOAD_WEAK_DYLIB: {
+                    MachO.DylibCommand dylibCommand = (MachO.DylibCommand) command.body();
                     ordinalList.add(dylibCommand.name());
                     neededList.add(new NeedLibrary(dylibCommand.name(), true, true));
                     break;
-                case REEXPORT_DYLIB:
-                    dylibCommand = (MachO.DylibCommand) command.body();
+                }
+                case REEXPORT_DYLIB: {
+                    MachO.DylibCommand dylibCommand = (MachO.DylibCommand) command.body();
                     ordinalList.add(dylibCommand.name());
                     exportDylibs.add((MachO.DylibCommand) command.body());
                     break;
-                case LAZY_LOAD_DYLIB:
-                    dylibCommand = (MachO.DylibCommand) command.body();
+                }
+                case LAZY_LOAD_DYLIB: {
+                    MachO.DylibCommand dylibCommand = (MachO.DylibCommand) command.body();
                     ordinalList.add(dylibCommand.name());
                     break;
+                }
                 case LOAD_UPWARD_DYLIB:
-                    dylibCommand = (MachO.DylibCommand) command.body();
+                    MachO.DylibCommand dylibCommand = (MachO.DylibCommand) command.body();
                     ordinalList.add(dylibCommand.name());
                     neededList.add(new NeedLibrary(dylibCommand.name(), true, false));
                     break;
@@ -667,6 +697,9 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
         Map<String, Module> exportModules = new LinkedHashMap<>();
 
+        if (rpathSet.isEmpty()) {
+            rpathSet.add(FilenameUtils.getFullPath(dylibPath));
+        }
         for (MachO.DylibCommand dylibCommand : exportDylibs) {
             String neededLibrary = dylibCommand.name();
             if (log.isDebugEnabled()) {
@@ -693,7 +726,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         Map<String, Module> upwardLibraries = new LinkedHashMap<>();
         final List<NeedLibrary> lazyLoadNeededList;
         if (loadNeeded) {
-            lazyLoadNeededList = Collections.emptyList();
+            lazyLoadNeededList = new ArrayList<>();
             for (NeedLibrary library : neededList) {
                 String neededLibrary = library.path;
                 if (log.isDebugEnabled()) {
@@ -706,17 +739,20 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                     neededLibraries.put(FilenameUtils.getBaseName(loaded.name), loaded);
                     continue;
                 }
+                if (library.upward) {
+                    lazyLoadNeededList.add(library);
+                    continue;
+                }
                 LibraryFile neededLibraryFile = resolveLibrary(libraryFile, neededLibrary, rpathSet);
                 if (neededLibraryFile != null) {
                     MachOModule needed = loadInternalPhase(neededLibraryFile, true, false, rpathSet);
                     needed.addReferenceCount();
-                    if (library.upward) {
-                        upwardLibraries.put(FilenameUtils.getBaseName(needed.name), needed);
-                    } else {
-                        neededLibraries.put(FilenameUtils.getBaseName(needed.name), needed);
-                    }
+                    neededLibraries.put(FilenameUtils.getBaseName(needed.name), needed);
                 } else if(!library.weak) {
-                    log.info(dyId + " load dependency " + neededLibrary + " failed: rpath=" + rpathSet);
+                    if ("/usr/lib/libnetwork.dylib".equals(neededLibrary)) {
+                        continue;
+                    }
+                    log.info("Module \"" + dyId + "\" load dependency " + neededLibrary + " failed: rpath=" + rpathSet);
                 }
             }
         } else {
@@ -728,11 +764,10 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
 
         final long loadSize = size;
-        MachOModule module = new MachOModule(machO, dyId, loadBase, loadSize, new HashMap<String, Module>(neededLibraries), regions,
+        MachOModule module = new MachOModule(machO, dyId, loadBase, loadSize, new HashMap<>(neededLibraries), regions,
                 symtabCommand, dysymtabCommand, buffer, lazyLoadNeededList, upwardLibraries, exportModules, dylibPath, emulator,
-                dyldInfoCommand, null, null, vars, machHeader, isExecutable, this, hookListeners, ordinalList,
+                dyldInfoCommand, chainedFixups, null, null, vars, machHeader, isExecutable, this, hookListeners, ordinalList,
                 fEHFrameSection, fUnwindInfoSection, objcSections, segments.toArray(new Segment[0]), libraryFile);
-        processRebase(log, module);
         if (isExecutable) {
             setExecuteModule(module);
         }
@@ -765,10 +800,11 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                 }
             }
         }
+        processRebase(log, module);
 
         if ("libsystem_malloc.dylib".equals(dyId)) {
-            malloc = module.findSymbolByName("_malloc");
-            free = module.findSymbolByName("_free");
+            malloc = module.findSymbolByName("_malloc", false);
+            free = module.findSymbolByName("_free", false);
         } else if ("Foundation".equals(dyId)) {
             Symbol _NSSetLogCStringFunction = module.findSymbolByName("__NSSetLogCStringFunction", false);
             if (_NSSetLogCStringFunction == null) {
@@ -853,17 +889,292 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
     }
 
-    private void processRebase(Log log, MachOModule module) {
-        MachO.DyldInfoCommand dyldInfoCommand = module.dyldInfoCommand;
+    private void processRebase(Log log, MachOModule mm) {
+        MachO.DyldInfoCommand dyldInfoCommand = mm.dyldInfoCommand;
         if (dyldInfoCommand == null) {
+            MachO.LinkeditDataCommand chainedFixups = mm.chainedFixups;
+            if (chainedFixups == null) {
+                return;
+            }
+            ByteBuffer buffer = mm.buffer.duplicate();
+            buffer.limit((int) (chainedFixups.dataOff() + chainedFixups.dataSize()));
+            buffer.position((int) chainedFixups.dataOff()); // dyld_chained_fixups_header
+            try (ByteBufferKaitaiStream io = new ByteBufferKaitaiStream(buffer.slice())) {
+                fixupAllChainedFixups(io, mm, chainedFixups);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
             return;
         }
 
         if (dyldInfoCommand.rebaseSize() > 0) {
-            ByteBuffer buffer = module.buffer.duplicate();
+            ByteBuffer buffer = mm.buffer.duplicate();
             buffer.limit((int) (dyldInfoCommand.rebaseOff() + dyldInfoCommand.rebaseSize()));
             buffer.position((int) dyldInfoCommand.rebaseOff());
-            rebase(log, buffer.slice(), module);
+            rebase(log, buffer.slice(), mm);
+        }
+    }
+
+    private void fixupAllChainedFixups(ByteBufferKaitaiStream io, MachOModule mm, MachO.LinkeditDataCommand chainedFixups) {
+        long fixups_version = io.readU4le();
+        long starts_offset = io.readU4le(); // offset of dyld_chained_starts_in_image in chain_data
+        long imports_offset = io.readU4le(); // offset of imports table in chain_data
+        long symbols_offset = io.readU4le(); // offset of symbol strings in chain_data
+        int imports_count = (int) io.readU4le(); // number of imported symbol names
+        int imports_format = (int) io.readU4le(); // DYLD_CHAINED_IMPORT*
+        long symbols_format = io.readU4le(); // 0 => uncompressed, 1 => zlib compressed
+        if (fixups_version != 0) {
+            throw new IllegalStateException("chained fixups, unknown header version");
+        }
+        if (starts_offset >= io.size()) {
+            throw new IllegalStateException("chained fixups, starts_offset exceeds LC_DYLD_CHAINED_FIXUPS size");
+        }
+        if (imports_offset >= io.size()) {
+            throw new IllegalStateException("chained fixups, imports_offset exceeds LC_DYLD_CHAINED_FIXUPS size");
+        }
+
+        ByteBuffer buffer = mm.buffer.duplicate();
+        buffer.limit((int) (chainedFixups.dataOff() + chainedFixups.dataSize()));
+        buffer.position((int) (chainedFixups.dataOff() + symbols_offset)); // symbolsPool
+        try (ByteBufferKaitaiStream symbolsPool = new ByteBufferKaitaiStream(buffer.slice())) {
+            long formatEntrySize;
+            /*
+             * http://localhost:8080/source/xref/dyld/common/MachOAnalyzer.cpp#2814
+             * http://localhost:8080/source/xref/dyld/common/MachOAnalyzer.cpp#5778
+             */
+            List<FixupChains.BindTarget> bindTargets = new ArrayList<>(imports_count);
+            switch (imports_format) {
+                case FixupChains.DYLD_CHAINED_IMPORT:
+                    /*
+                     * struct dyld_chained_import {
+                     *     uint32_t    lib_ordinal :  8,
+                     *                 weak_import :  1,
+                     *                 name_offset : 23;
+                     * };
+                     */
+                    formatEntrySize = 4;
+                    io.seek(imports_offset);
+                    for (int i = 0; i < imports_count; i++) {
+                        long raw32 = io.readU4le();
+                        int lib_ordinal = (int) (raw32 & 0xff);
+                        raw32 >>>= 8;
+                        boolean weak_import = (raw32 & 1) != 0;
+                        int name_offset = (int) (raw32 >>> 1);
+                        if (lib_ordinal > 0xf0) {
+                            lib_ordinal = (byte) lib_ordinal;
+                        }
+                        bindTargets.add(new FixupChains.dyld_chained_import_addend64(lib_ordinal, weak_import, name_offset, 0L));
+                    }
+                    break;
+                case FixupChains.DYLD_CHAINED_IMPORT_ADDEND: {
+                    /*
+                     * struct dyld_chained_import_addend {
+                     *     uint32_t    lib_ordinal :  8,
+                     *                 weak_import :  1,
+                     *                 name_offset : 23;
+                     *     int32_t     addend;
+                     * };
+                     */
+                    formatEntrySize = 8;
+                    io.seek(imports_offset);
+                    for (int i = 0; i < imports_count; i++) {
+                        long raw32 = io.readU4le();
+                        int lib_ordinal = (int) (raw32 & 0xff);
+                        raw32 >>>= 8;
+                        boolean weak_import = (raw32 & 1) != 0;
+                        int name_offset = (int) (raw32 >>> 1);
+                        long addend = io.readU4le();
+                        if (lib_ordinal > 0xf0) {
+                            lib_ordinal = (byte) lib_ordinal;
+                        }
+                        bindTargets.add(new FixupChains.dyld_chained_import_addend64(lib_ordinal, weak_import, name_offset, addend));
+                    }
+                    break;
+                }
+                case FixupChains.DYLD_CHAINED_IMPORT_ADDEND64:
+                    /*
+                     * struct dyld_chained_import_addend64 {
+                     *     uint64_t    lib_ordinal : 16,
+                     *                 weak_import :  1,
+                     *                 reserved    : 15,
+                     *                 name_offset : 32;
+                     *     uint64_t    addend;
+                     * };
+                     */
+                    formatEntrySize = 16;
+                    io.seek(imports_offset);
+                    for (int i = 0; i < imports_count; i++) {
+                        long raw64 = io.readU8le();
+                        int lib_ordinal = (int) (raw64 & 0xffff);
+                        raw64 >>>= 16;
+                        boolean weak_import = (raw64 & 1) != 0;
+                        int name_offset = (int) (raw64 >>> 16);
+                        long addend = io.readU8le();
+                        if (lib_ordinal > 0xfff0) {
+                            lib_ordinal = (short) lib_ordinal;
+                        }
+                        bindTargets.add(new FixupChains.dyld_chained_import_addend64(lib_ordinal, weak_import, name_offset, addend));
+                    }
+                    break;
+                default:
+                    throw new IllegalStateException("chained fixups, unknown imports_format");
+            }
+            if (FixupChains.greaterThanAddOrOverflow(imports_offset, (formatEntrySize * imports_count), symbols_offset)) {
+                throw new IllegalStateException("chained fixups, imports array overlaps symbols");
+            }
+            if (symbols_format != 0) {
+                throw new IllegalStateException("chained fixups, symbols_format unknown");
+            }
+
+            io.seek(starts_offset); // dyld_chained_starts_in_image
+            int seg_count = (int) io.readU4le();
+            if (seg_count != mm.segments.length) {
+                if (seg_count > mm.segments.length) {
+                    throw new IllegalStateException("chained fixups, seg_count exceeds number of segments");
+                }
+
+                // We can have fewer segments than the count, so long as those we are missing have no relocs
+                int numNoRelocSegments = 0;
+                int numExtraSegments = mm.segments.length - seg_count;
+                for (Segment segment : mm.segments) {
+                    if (segment.vmSize == 0) {
+                        ++numNoRelocSegments;
+                    }
+                }
+                if (numNoRelocSegments != numExtraSegments) {
+                    throw new IllegalStateException("chained fixups, seg_count does not match number of segments");
+                }
+            }
+            long[] seg_info_offset = new long[seg_count];
+            for (int i = 0; i < seg_count; i++) {
+                seg_info_offset[i] = io.readU4le();
+            }
+            int pointer_format_for_all = -1;
+            long maxValidPointerSeen = 0;
+            for (int i = 0; i < seg_info_offset.length; i++) {
+                long offset = seg_info_offset[i];
+                if (offset == 0) {
+                    continue;
+                }
+                io.seek(starts_offset + offset); // dyld_chained_starts_in_segment
+                long size = io.readU4le(); // size of this (amount kernel needs to copy)
+                if (offset + size > imports_offset) { // endOfStarts
+                    throw new IllegalStateException(String.format("chained fixups, dyld_chained_starts_in_segment for segment #%d overruns imports table", i));
+                }
+                int page_size = io.readU2le(); // 0x1000 or 0x4000
+                if ((page_size != 0x1000) && (page_size != 0x4000)) {
+                    throw new IllegalStateException(String.format("chained fixups, page_size not 4KB or 16KB in segment #%d", i));
+                }
+                int pointer_format = io.readU2le(); // DYLD_CHAINED_PTR_*
+                if (pointer_format > 12) {
+                    throw new IllegalStateException(String.format("chained fixups, unknown pointer_format in segment #%d", i));
+                }
+                if (pointer_format_for_all == -1) {
+                    pointer_format_for_all = pointer_format;
+                }
+                if (pointer_format != pointer_format_for_all) {
+                    throw new IllegalStateException(String.format("chained fixups, pointer_format not same for all segments %d and %d", pointer_format, pointer_format_for_all));
+                }
+                long segment_offset = io.readU8le(); // offset in memory to start of segment
+                if (segment_offset != (mm.segments[i].vmAddr - mm.machHeader) && segment_offset != mm.segments[i].vmAddr) {
+                    throw new IllegalStateException(String.format("chained fixups, segment_offset does not match vmaddr from LC_SEGMENT in segment #%d", i));
+                }
+                long max_valid_pointer = io.readU4le(); // for 32-bit OS, any value beyond this is not a pointer
+                if (max_valid_pointer != 0) {
+                    if (maxValidPointerSeen == 0) {
+                        // record max_valid_pointer values seen
+                        maxValidPointerSeen = max_valid_pointer;
+                    } else if (maxValidPointerSeen != max_valid_pointer) {
+                        throw new IllegalStateException("chained fixups, different max_valid_pointer values seen in different segments");
+                    }
+                }
+                int page_count = io.readU2le(); // how many pages are in array
+                if (page_count == 0) {
+                    continue;
+                }
+                for (long pageIndex = 0; pageIndex < page_count; pageIndex++) {
+                    int offsetInPage = io.readU2le(); // each entry is offset in each page of first element in chain or DYLD_CHAINED_PTR_START_NONE if no fixups on page
+                    if (offsetInPage == FixupChains.DYLD_CHAINED_PTR_START_NONE) {
+                        continue;
+                    }
+                    if ((offsetInPage & FixupChains.DYLD_CHAINED_PTR_START_MULTI) != 0) {
+                        throw new UnsupportedOperationException("DYLD_CHAINED_PTR_START_MULTI");
+                    } else if (offsetInPage > page_size) {
+                        throw new IllegalStateException(String.format("chained fixups, in segment #%d page_start[%d]=0x%04X exceeds page size", i, pageIndex, offsetInPage));
+                    }
+
+                    // one chain per page
+                    Pointer pageContentStart = UnidbgPointer.pointer(emulator, mm.machHeader + segment_offset + (pageIndex * page_size));
+                    assert pageContentStart != null;
+                    Pointer chain = pageContentStart.share(offsetInPage);
+                    walkChain(mm, chain, pointer_format, bindTargets, symbolsPool);
+                }
+            }
+
+            if (imports_count != 0) {
+                int maxBindOrdinal = 0;
+                switch (pointer_format_for_all) {
+                    case FixupChains.DYLD_CHAINED_PTR_32:
+                        maxBindOrdinal = 0x0fffff; // 20-bits
+                        break;
+                    case FixupChains.DYLD_CHAINED_PTR_ARM64E:
+                    case FixupChains.DYLD_CHAINED_PTR_ARM64E_USERLAND:
+                    case FixupChains.DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                        maxBindOrdinal = 0x00ffff; // 16-bits
+                        break;
+                    case FixupChains.DYLD_CHAINED_PTR_64:
+                    case FixupChains.DYLD_CHAINED_PTR_64_OFFSET:
+                    case FixupChains.DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+                        maxBindOrdinal = 0xFFFFFF; // 24 bits
+                        break;
+                }
+                if (imports_count >= maxBindOrdinal) {
+                    throw new IllegalStateException(String.format("chained fixups, imports_count (%d) exceeds max of %d", imports_count, maxBindOrdinal));
+                }
+            }
+            if (maxValidPointerSeen != 0) {
+                Segment segment = mm.segments[mm.segments.length - 1];
+                long lastSegmentLastVMAddr = segment.vmAddr + segment.vmSize;
+                if (maxValidPointerSeen < lastSegmentLastVMAddr) {
+                    throw new IllegalStateException("chained fixups, max_valid_pointer too small for image");
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * <a href="http://localhost:8080/source/xref/dyld/common/MachOLoaded.cpp#1308">参考实现</a>
+     */
+    private void walkChain(MachOModule mm, Pointer chain, int pointer_format, List<FixupChains.BindTarget> bindTargets, ByteBufferKaitaiStream symbolsPool) {
+        boolean chainEnd = false;
+        while (!chainEnd) {
+            long raw64 = chain.getLong(0);
+            FixupChains.handleChain(emulator, mm, hookListeners, pointer_format, chain, raw64, bindTargets, symbolsPool);
+            switch (pointer_format) {
+                case FixupChains.DYLD_CHAINED_PTR_ARM64E: {
+                    long dyld_chained_ptr_arm64e_rebase = chain.getLong(16);
+                    int next = (int) ((dyld_chained_ptr_arm64e_rebase >> 51) & 0x7ff);
+                    if (next == 0) {
+                        chainEnd = true;
+                    } else {
+                        chain = chain.share(next * 8);
+                    }
+                    break;
+                }
+                case FixupChains.DYLD_CHAINED_PTR_64:
+                case FixupChains.DYLD_CHAINED_PTR_64_OFFSET:
+                    int next = (int) ((raw64 >> 51) & 0xfff);
+                    if (next == 0) {
+                        chainEnd = true;
+                    } else {
+                        chain = chain.share(next * 4);
+                    }
+                    break;
+                default:
+                    throw new UnsupportedOperationException("pointer_format=" + pointer_format);
+            }
         }
     }
 
@@ -1039,7 +1350,14 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             long address = resolveSymbol(module, symbol);
 
             if (address == 0L) {
-                log.warn("bindExternalRelocations failed symbol=" + symbol + ", isWeakRef=" + isWeakRef);
+                if (isWeakRef) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("bindExternalRelocations failed symbol=" + symbol + ", isWeakRef=true");
+                    }
+                    pointer.setPointer(0, null);
+                } else {
+                    log.warn("bindExternalRelocations failed symbol=" + symbol + ", isWeakRef=false");
+                }
                 ret = false;
             } else {
                 pointer.setPointer(0, UnidbgPointer.pointer(emulator, address));
@@ -1051,8 +1369,25 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         return ret;
     }
 
-    private long resolveSymbol(Module module, Symbol symbol) {
-        Symbol replace = module.findSymbolByName(symbol.getName(), true);
+    private long resolveSymbol(MachOModule module, MachOSymbol symbol) {
+        int libraryOrdinal = symbol.getLibraryOrdinal();
+        Symbol replace = null;
+        if (libraryOrdinal == BIND_SPECIAL_DYLIB_SELF) {
+            replace = module.findSymbolByName(symbol.getName(), false);
+        } else if (libraryOrdinal <= module.ordinalList.size()) {
+            String path = module.ordinalList.get(libraryOrdinal - 1);
+            MachOModule targetImage = this.modules.get(FilenameUtils.getName(path));
+            if (targetImage != null) {
+                replace = findSymbolInternal(targetImage, symbol.getName());
+            } else {
+                if (log.isDebugEnabled()) {
+                    log.debug("resolveSymbol libraryOrdinal=" + libraryOrdinal + ", path=" + path);
+                }
+            }
+        } else {
+            throw new IllegalStateException(String.format("bad mach-o binary, library ordinal (%d) too big (max %d) for symbol %s in %s", libraryOrdinal, module.ordinalList.size(), symbol.getName(), module.getPath()));
+        }
+
         long address = replace == null ? 0L : replace.getAddress();
         for (HookListener listener : hookListeners) {
             long hook = listener.hook(emulator.getSvcMemory(), replace == null ? module.name : replace.getModuleName(), symbol.getName(), address);
@@ -1153,17 +1488,16 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
         module.indirectSymbolBound = true;
 
+        if (module.chainedFixups != null) {
+            return;
+        }
+
         MachO.DysymtabCommand dysymtabCommand = module.dysymtabCommand;
         if (dysymtabCommand == null) { // virtual module
             return;
         }
 
         List<Long> indirectTable = dysymtabCommand.indirectSymbols();
-        Log log = LogFactory.getLog("com.github.unidbg.ios." + module.name);
-        if (!log.isDebugEnabled()) {
-            log = MachOLoader.log;
-        }
-
         MachO.DyldInfoCommand dyldInfoCommand = module.dyldInfoCommand;
         if (dyldInfoCommand == null) {
             bindLocalRelocations(module);
@@ -1171,73 +1505,20 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             boolean ret = true;
             for (MachO.LoadCommand command : module.machO.loadCommands()) {
                 switch (command.type()) {
-                    case SEGMENT:
+                    case SEGMENT: {
                         MachO.SegmentCommand segmentCommand = (MachO.SegmentCommand) command.body();
                         for (MachO.SegmentCommand.Section section : segmentCommand.sections()) {
-                            long type = section.flags() & SECTION_TYPE;
-                            long elementCount = section.size() / emulator.getPointerSize();
-
-                            if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) {
-                                continue;
-                            }
-
-                            long ptrToBind = section.addr();
-                            int indirectTableOffset = (int) section.reserved1();
-                            for (int i = 0; i < elementCount; i++, ptrToBind += emulator.getPointerSize()) {
-                                long symbolIndex = indirectTable.get(indirectTableOffset + i);
-                                if (symbolIndex == INDIRECT_SYMBOL_ABS) {
-                                    continue; // do nothing since already has absolute address
-                                }
-                                if (symbolIndex == INDIRECT_SYMBOL_LOCAL) {
-                                    UnidbgPointer pointer = UnidbgPointer.pointer(emulator, ptrToBind + module.base);
-                                    if (pointer == null) {
-                                        throw new IllegalStateException("pointer is null");
-                                    }
-                                    Pointer newPointer = pointer.getPointer(0);
-                                    if (newPointer == null) {
-                                        newPointer = UnidbgPointer.pointer(emulator, module.base);
-                                    } else {
-                                        newPointer = newPointer.share(module.base);
-                                    }
-                                    if (log.isDebugEnabled()) {
-                                        log.debug("bindIndirectSymbolPointers pointer=" + pointer + ", newPointer=" + newPointer);
-                                    }
-                                    pointer.setPointer(0, newPointer);
-                                    continue;
-                                }
-
-                                MachOSymbol symbol = module.getSymbolByIndex((int) symbolIndex);
-                                if (symbol == null) {
-                                    log.warn("bindIndirectSymbolPointers symbol is null");
-                                    ret = false;
-                                    continue;
-                                }
-
-                                boolean isWeakRef = (symbol.nlist.desc() & N_WEAK_REF) != 0;
-                                long address = resolveSymbol(module, symbol);
-
-                                UnidbgPointer pointer = UnidbgPointer.pointer(emulator, ptrToBind + module.base);
-                                if (pointer == null) {
-                                    throw new IllegalStateException("pointer is null");
-                                }
-                                if (address == 0L) {
-                                    if (isWeakRef) {
-                                        log.info("bindIndirectSymbolPointers symbol=" + symbol + ", isWeakRef=true");
-                                        pointer.setPointer(0, null);
-                                    } else {
-                                        log.warn("bindIndirectSymbolPointers failed symbol=" + symbol);
-                                    }
-                                } else {
-                                    pointer.setPointer(0, UnidbgPointer.pointer(emulator, address));
-                                    if (log.isDebugEnabled()) {
-                                        log.debug("bindIndirectSymbolPointers symbolIndex=0x" + Long.toHexString(symbolIndex) + ", symbol=" + symbol + ", ptrToBind=0x" + Long.toHexString(ptrToBind));
-                                    }
-                                }
-                            }
+                            ret = processSection(module, indirectTable, ret, section.flags(), section.size(), section.addr(), section.reserved1());
                         }
                         break;
-                    case SEGMENT_64:
-                        throw new UnsupportedOperationException("bindIndirectSymbolPointers SEGMENT_64");
+                    }
+                    case SEGMENT_64: {
+                        MachO.SegmentCommand64 segmentCommand = (MachO.SegmentCommand64) command.body();
+                        for (MachO.SegmentCommand64.Section64 section : segmentCommand.sections()) {
+                            ret = processSection(module, indirectTable, ret, section.flags(), section.size(), section.addr(), section.reserved1());
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -1248,9 +1529,81 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                 ByteBuffer buffer = module.buffer.duplicate();
                 buffer.limit((int) (dyldInfoCommand.bindOff() + dyldInfoCommand.bindSize()));
                 buffer.position((int) dyldInfoCommand.bindOff());
+
+                Log log = LogFactory.getLog("com.github.unidbg.ios." + module.name);
+                if (!log.isDebugEnabled()) {
+                    log = MachOLoader.log;
+                }
                 module.allSymbolBound = eachBind(log, buffer.slice(), module);
             }
         }
+    }
+
+    private boolean processSection(MachOModule module, List<Long> indirectTable, boolean allSymbolBound, long flags, long size, long addr, long reserved1) {
+        Log log = LogFactory.getLog("com.github.unidbg.ios." + module.name);
+        if (!log.isDebugEnabled()) {
+            log = MachOLoader.log;
+        }
+
+        long type = flags & SECTION_TYPE;
+        long elementCount = size / emulator.getPointerSize();
+
+        if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) {
+            return allSymbolBound;
+        }
+
+        long ptrToBind = addr;
+        int indirectTableOffset = (int) reserved1;
+        for (int i = 0; i < elementCount; i++, ptrToBind += emulator.getPointerSize()) {
+            long symbolIndex = indirectTable.get(indirectTableOffset + i);
+            if (symbolIndex == INDIRECT_SYMBOL_ABS) {
+                continue; // do nothing since already has absolute address
+            }
+            if (symbolIndex == INDIRECT_SYMBOL_LOCAL) {
+                UnidbgPointer pointer = UnidbgPointer.pointer(emulator, ptrToBind + module.base);
+                if (pointer == null) {
+                    throw new IllegalStateException("pointer is null");
+                }
+                Pointer newPointer = pointer.getPointer(0);
+                if (newPointer == null) {
+                    newPointer = UnidbgPointer.pointer(emulator, module.base);
+                } else {
+                    newPointer = newPointer.share(module.base);
+                }
+                if (log.isDebugEnabled()) {
+                    log.debug("bindIndirectSymbolPointers pointer=" + pointer + ", newPointer=" + newPointer);
+                }
+                pointer.setPointer(0, newPointer);
+                continue;
+            }
+
+            MachOSymbol symbol = module.getSymbolByIndex((int) symbolIndex);
+            if (symbol == null) {
+                log.warn("bindIndirectSymbolPointers symbol is null");
+                allSymbolBound = false;
+                continue;
+            }
+
+            boolean isWeakRef = (symbol.nlist.desc() & N_WEAK_REF) != 0;
+            long address = resolveSymbol(module, symbol);
+
+            UnidbgPointer pointer = UnidbgPointer.pointer(emulator, ptrToBind + module.base);
+            if (pointer == null) {
+                throw new IllegalStateException("pointer is null");
+            }
+            if (address == 0L) {
+                if (log.isDebugEnabled()) {
+                    log.debug("bindIndirectSymbolPointers symbol=" + symbol + ", isWeakRef=" + isWeakRef);
+                }
+                pointer.setPointer(0, null);
+            } else {
+                pointer.setPointer(0, UnidbgPointer.pointer(emulator, address));
+                if (log.isDebugEnabled()) {
+                    log.debug("bindIndirectSymbolPointers symbolIndex=0x" + Long.toHexString(symbolIndex) + ", symbol=" + symbol + ", ptrToBind=0x" + Long.toHexString(ptrToBind));
+                }
+            }
+        }
+        return allSymbolBound;
     }
 
     private boolean eachBind(Log log, ByteBuffer buffer, MachOModule module) {
@@ -1359,7 +1712,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         if (pointer == null) {
             throw new IllegalStateException();
         }
-        libraryOrdinal = (byte) libraryOrdinal;
+//        libraryOrdinal = (byte) libraryOrdinal;
 
         MachOModule targetImage;
         if (libraryOrdinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE) {
@@ -1368,7 +1721,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             targetImage = module;
         } else if (libraryOrdinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP) {
             for(MachOModule mm : modules.values().toArray(new MachOModule[0])) {
-                if (doBindAt(type, pointer, addend, module, mm, symbolName, false)) {
+                if (doBindAt(type, pointer, addend, module, mm, symbolName)) {
                     return true;
                 }
             }
@@ -1387,7 +1740,18 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         } else {
             throw new IllegalStateException(String.format("bad mach-o binary, library ordinal (%d) too big (max %d) for symbol %s in %s", libraryOrdinal, module.ordinalList.size(), symbolName, module.getPath()));
         }
-        if ("___NSArray0__".equals(symbolName)) {
+
+        targetImage = fakeTargetImage(targetImage, symbolName);
+        return doBindAt(type, pointer, addend, module, targetImage, symbolName);
+    }
+
+    final MachOModule fakeTargetImage(MachOModule targetImage, String symbolName) {
+        if ("___NSArray0__".equals(symbolName) ||
+                "___NSDictionary0__".equals(symbolName) ||
+                "_OBJC_CLASS_$_NSConstantIntegerNumber".equals(symbolName) ||
+                "_NSProcessInfoPowerStateDidChangeNotification".equals(symbolName) ||
+                "_NSExtensionHostDidEnterBackgroundNotification".equals(symbolName) ||
+                "_NSExtensionHostDidBecomeActiveNotification".equals(symbolName)) {
             targetImage = this.modules.get("UIKit");
             if (targetImage == null) {
                 targetImage = this.modules.get("AppKit");
@@ -1396,18 +1760,44 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                 throw new IllegalStateException();
             }
         }
-
-        return doBindAt(type, pointer, addend, module, targetImage, symbolName, true);
+        return targetImage;
     }
 
-    private boolean doBindAt(int type, Pointer pointer, long addend, Module module, MachOModule targetImage, String symbolName, boolean withDependencies) {
-        Symbol symbol = targetImage.findSymbolByName(symbolName, withDependencies);
-        if (symbol == null) {
-            symbol = targetImage.getExportByName(symbolName);
-            if (log.isDebugEnabled()) {
-                log.debug("doBindAt use export symbol: " + symbol);
+    final Symbol findSymbolInternal(MachOModule targetImage, String symbolName) {
+        if ("CoreFoundation".equals(targetImage.name)) {
+            if ("___kCFBooleanFalse".equals(symbolName) ||
+                    "___kCFBooleanTrue".equals(symbolName)) {
+                Symbol symbol = targetImage.findSymbolByName(symbolName.substring(2), false);
+                if (symbol == null) {
+                    throw new IllegalStateException();
+                }
+                long address = symbol.getAddress();
+                Pointer pointer = UnidbgPointer.pointer(emulator, address);
+                assert pointer != null;
+                long value = pointer.getLong(0);
+                return new ExportSymbol(symbolName, value, targetImage, 0, com.github.unidbg.ios.MachO.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE);
             }
         }
+        Symbol symbol = targetImage.findSymbolByName(symbolName, false);
+        if (symbol != null) {
+            return symbol;
+        }
+        if ("CFNetwork".equals(targetImage.name)) {
+            MachOModule foundation = modules.get("Foundation");
+            if (foundation != null) {
+                symbol = findSymbolInternal(foundation, symbolName);
+                if (symbol != null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Redirect symbol=" + symbol);
+                    }
+                }
+            }
+        }
+        return symbol;
+    }
+
+    private boolean doBindAt(int type, Pointer pointer, long addend, Module module, MachOModule targetImage, String symbolName) {
+        Symbol symbol = this.findSymbolInternal(targetImage, symbolName);
         if (symbol == null) {
             if (log.isDebugEnabled()) {
                 log.info("doBindAt type=" + type + ", symbolName=" + symbolName + ", targetImage=" + targetImage);
@@ -1436,7 +1826,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             return false;
         }
 
-        long bindAt = symbol.getAddress();
+        long bindAt = symbol.getAddress() + addend;
         for (HookListener listener : hookListeners) {
             long hook = listener.hook(emulator.getSvcMemory(), symbol.getModuleName(), symbol.getName(), bindAt);
             if (hook > 0) {
@@ -1450,11 +1840,6 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
 
         Pointer newPointer = UnidbgPointer.pointer(emulator, bindAt);
-        if (newPointer == null) {
-            newPointer = UnidbgPointer.pointer(emulator, addend);
-        } else {
-            newPointer = newPointer.share(addend);
-        }
         switch (type) {
             case BIND_TYPE_POINTER:
                 pointer.setPointer(0, newPointer);
@@ -1553,10 +1938,10 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         if ("/usr/lib/libSystem.dylib".equals(path)) {
             path = "/usr/lib/libSystem.B.dylib";
         }
-        MachOModule loaded = modules.get(FilenameUtils.getName(path));
-        if (loaded != null) {
-            loaded.addReferenceCount();
-            return loaded;
+        MachOModule loadedModule = modules.get(FilenameUtils.getName(path));
+        if (loadedModule != null) {
+            loadedModule.addReferenceCount();
+            return loadedModule;
         }
 
         for (Module module : getLoadedModules()) {
@@ -1573,11 +1958,44 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             return null;
         }
 
-        MachOModule module = loadInternalPhase(libraryFile, true, false, Collections.<String>emptyList());
+        MachOModule module = loadInternalPhase(libraryFile, true, false, Collections.emptyList());
+
+        for (MachOModule export : modules.values().toArray(new MachOModule[0])) {
+            for (NeedLibrary library : export.lazyLoadNeededList.toArray(new NeedLibrary[0])) {
+                String neededLibrary = library.path;
+                if (log.isDebugEnabled()) {
+                    log.debug(export.getPath() + " need dependency " + neededLibrary);
+                }
+
+                MachOModule loaded = modules.get(FilenameUtils.getName(neededLibrary));
+                if (loaded != null) {
+                    if (library.upward) {
+                        export.upwardLibraries.put(FilenameUtils.getBaseName(neededLibrary), loaded);
+                    }
+                    continue;
+                }
+                try {
+                    LibraryFile neededLibraryFile = resolveLibrary(libraryFile, neededLibrary, Collections.singletonList(FilenameUtils.getFullPath(libraryFile.getPath())));
+                    if (neededLibraryFile != null) {
+                        MachOModule needed = loadInternalPhase(neededLibraryFile, true, false, Collections.emptySet());
+                        needed.addReferenceCount();
+
+                        if (library.upward) {
+                            export.upwardLibraries.put(FilenameUtils.getBaseName(needed.name), needed);
+                        }
+                    } else if (!library.weak) {
+                        log.info(export.getPath() + " load dependency " + neededLibrary + " failed");
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            export.lazyLoadNeededList.clear();
+        }
 
         for (MachOModule export : modules.values()) {
             if (!export.lazyLoadNeededList.isEmpty()) {
-                log.info("Export module resolve needed library failed: " + export.name + ", neededList=" + export.lazyLoadNeededList);
+                log.info("dlopen " + path + " resolve needed library failed: " + export.name + ", neededList=" + export.lazyLoadNeededList);
             }
         }
         for (MachOModule m : modules.values()) {
@@ -1614,6 +2032,12 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             if (module.machHeader == handle) {
                 return module.findSymbolByName(symbolName, false);
             }
+            if (handle == Dyld.RTLD_NEXT) {
+                Symbol symbol = module.findSymbolByName(symbolName, false);
+                if (symbol != null) {
+                    return symbol;
+                }
+            }
         }
         if (handle == Dyld.RTLD_DEFAULT) {
             for (Module module : modules.values()) {
@@ -1629,10 +2053,10 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
     @Override
     public Collection<Module> getLoadedModules() {
-        return new ArrayList<Module>(modules.values());
+        return new ArrayList<>(modules.values());
     }
 
-    final Collection<Module> getLoadedModulesNoVirtual() {
+    final List<Module> getLoadedModulesNoVirtual() {
         List<Module> list = new ArrayList<>(modules.size());
         for (MachOModule mm : modules.values()) {
             if (!mm.isVirtual()) {
@@ -1655,6 +2079,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
     final List<UnidbgPointer> addImageCallbacks = new ArrayList<>();
     final List<UnidbgPointer> boundHandlers = new ArrayList<>();
     final List<UnidbgPointer> initializedHandlers = new ArrayList<>();
+    UnidbgPointer _objcNotifyMapped;
+    UnidbgPointer _objcNotifyInit;
 
     private UnidbgStructure createDyldImageInfo(MachOModule module) {
         if (emulator.is64Bit()) {
@@ -1725,6 +2151,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                         Module.emulateFunction(emulator, handler.peer, state, 1, info);
                     }
                 }
+                module.callObjcNotifyInit(_objcNotifyInit);
                 break;
             default:
                 throw new UnsupportedOperationException("state=" + state);
@@ -1773,7 +2200,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         if (memoryMap != null) {
             munmap(args.target_address, (int) args.size);
         }
-        int prot = memoryMap == null ? UnicornConst.UC_PROT_ALL : memoryMap.prot;
+        int prot = UnicornConst.UC_PROT_ALL;
         try {
             backend.mem_map(args.target_address, args.size, prot);
             if (mMapListener != null) {

@@ -4,18 +4,18 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <parent>
         <groupId>com.github.zhkl0228</groupId>
-        <artifactId>unidbg-parent</artifactId>
-        <version>0.9.7-SNAPSHOT</version>
+        <artifactId>unidbg</artifactId>
+        <version>0.9.8-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>unidbg-android</artifactId>
-    <version>0.9.7-SNAPSHOT</version>
+    <version>0.9.8-SNAPSHOT</version>
     <dependencies>
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-api</artifactId>
-            <version>0.9.7-SNAPSHOT</version>
+            <version>0.9.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>net.dongliu</groupId>
@@ -25,25 +25,25 @@
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-dynarmic</artifactId>
-            <version>0.9.7-SNAPSHOT</version>
+            <version>0.9.8-SNAPSHOT</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-hypervisor</artifactId>
-            <version>0.9.7-SNAPSHOT</version>
+            <version>0.9.8-SNAPSHOT</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-kvm</artifactId>
-            <version>0.9.7-SNAPSHOT</version>
+            <version>0.9.8-SNAPSHOT</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-unicorn2</artifactId>
-            <version>0.9.7-SNAPSHOT</version>
+            <version>0.9.8-SNAPSHOT</version>
             <scope>test</scope>
         </dependency>
         <dependency>

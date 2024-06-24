@@ -14,18 +14,18 @@ import com.github.unidbg.linux.file.PipedWriteFileIO;
 import com.github.unidbg.linux.signal.SigAction;
 import com.github.unidbg.linux.signal.SignalFunction;
 import com.github.unidbg.linux.signal.SignalTask;
-import com.github.unidbg.linux.thread.NanoSleepWaiter;
-import com.github.unidbg.signal.UnixSigSet;
 import com.github.unidbg.linux.struct.StatFS;
 import com.github.unidbg.linux.struct.StatFS32;
 import com.github.unidbg.linux.struct.StatFS64;
 import com.github.unidbg.linux.thread.FutexIndefinitelyWaiter;
+import com.github.unidbg.linux.thread.FutexNanoSleepWaiter;
 import com.github.unidbg.linux.thread.FutexWaiter;
 import com.github.unidbg.linux.thread.MarshmallowThread;
-import com.github.unidbg.memory.Memory;
+import com.github.unidbg.linux.thread.NanoSleepWaiter;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.github.unidbg.signal.SigSet;
 import com.github.unidbg.signal.SignalOps;
+import com.github.unidbg.signal.UnixSigSet;
 import com.github.unidbg.spi.SyscallHandler;
 import com.github.unidbg.thread.MainTask;
 import com.github.unidbg.thread.RunnableTask;
@@ -43,7 +43,10 @@ import com.sun.jna.Pointer;
 import net.dongliu.apk.parser.utils.Pair;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
@@ -54,12 +57,32 @@ import java.util.Map;
 
 public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFileIO> implements SyscallHandler<AndroidFileIO> {
 
-    private static final Log log = LogFactory.getLog(AndroidSyscallHandler.class);
+    private static final Logger log = LoggerFactory.getLogger(AndroidSyscallHandler.class);
 
     static final int MREMAP_MAYMOVE = 1;
     static final int MREMAP_FIXED = 2;
 
     private byte[] sched_cpu_mask;
+
+    final int mlock(Emulator<?> emulator) {
+        RegisterContext context = emulator.getContext();
+        Pointer addr = context.getPointerArg(0);
+        int len = context.getIntArg(1);
+        if (log.isDebugEnabled()) {
+            log.debug("mlock addr={}, len={}", addr, len);
+        }
+        return 0;
+    }
+
+    final int munlock(Emulator<AndroidFileIO> emulator) {
+        RegisterContext context = emulator.getContext();
+        Pointer addr = context.getPointerArg(0);
+        int len = context.getIntArg(1);
+        if (log.isDebugEnabled()) {
+            log.debug("munlock addr={}, len={}", addr, len);
+        }
+        return 0;
+    }
 
     final long sched_setaffinity(Emulator<AndroidFileIO> emulator) {
         RegisterContext context = emulator.getContext();
@@ -100,7 +123,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int initval = ctx.getIntArg(0);
         int flags = ctx.getIntArg(1);
         if (log.isDebugEnabled()) {
-            log.debug("eventfd2 initval=" + initval + ", flags=0x" + Integer.toHexString(flags));
+            log.debug("eventfd2 initval={}, flags=0x{}", initval, Integer.toHexString(flags));
         }
         if ((flags & EFD_CLOEXEC) != 0) {
             throw new UnsupportedOperationException("eventfd2 flags=0x" + Integer.toHexString(flags));
@@ -122,9 +145,22 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int policy = context.getIntArg(1);
         Pointer param = context.getPointerArg(2);
         if (log.isDebugEnabled()) {
-            log.debug("sched_setscheduler pid=" + pid + ", policy=" + policy + ", param=" + param);
+            log.debug("sched_setscheduler pid={}, policy={}, param={}", pid, policy, param);
         }
         return 0;
+    }
+
+    protected int getcwd(Emulator<?> emulator) {
+        RegisterContext context = emulator.getContext();
+        UnidbgPointer buf = context.getPointerArg(0);
+        int size = context.getIntArg(1);
+        File workDir = emulator.getFileSystem().createWorkDir();
+        String path = workDir.getPath();
+        if (log.isDebugEnabled()) {
+            log.debug("getcwd buf={}, size={}, path={}", buf, size, path);
+        }
+        buf.setString(0, ".");
+        return (int) buf.peer;
     }
 
     private static final int SCHED_OTHER = 0;
@@ -133,7 +169,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         RegisterContext context = emulator.getContext();
         int pid = context.getIntArg(0);
         if (log.isDebugEnabled()) {
-            log.debug("sched_getscheduler pid=" + pid);
+            log.debug("sched_getscheduler pid={}", pid);
         }
         return SCHED_OTHER;
     }
@@ -143,7 +179,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int pid = context.getIntArg(0);
         Pointer param = context.getPointerArg(1);
         if (log.isDebugEnabled()) {
-            log.debug("sched_getparam pid=" + pid + ", param=" + param);
+            log.debug("sched_getparam pid={}, param={}", pid, param);
         }
         param.setInt(0, ANDROID_PRIORITY_NORMAL);
         return 0;
@@ -167,7 +203,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int which = context.getIntArg(0);
         int who = context.getIntArg(1);
         if (log.isDebugEnabled()) {
-            log.debug("getpriority which=" + which + ", who=" + who);
+            log.debug("getpriority which={}, who={}", which, who);
         }
         return ANDROID_PRIORITY_NORMAL;
     }
@@ -178,7 +214,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int who = context.getIntArg(1);
         int prio = context.getIntArg(2);
         if (log.isDebugEnabled()) {
-            log.debug("setpriority which=" + which + ", who=" + who + ", prio=" + prio);
+            log.debug("setpriority which={}, who={}, prio={}", which, who, prio);
         }
         return 0;
     }
@@ -233,7 +269,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         RegisterContext context = emulator.getContext();
         Pointer set = context.getPointerArg(0);
         if (log.isDebugEnabled()) {
-            log.debug("rt_sigpending set=" + set);
+            log.debug("rt_sigpending set={}", set);
         }
         Task task = emulator.get(Task.TASK_KEY);
         SignalOps signalOps = task.isMainThread() ? emulator.getThreadDispatcher() : task;
@@ -254,8 +290,11 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
     private static final int MUTEX_TYPE_MASK = 0xc000;
     private static final int FUTEX_WAIT = 0;
     private static final int FUTEX_WAKE = 1;
+    private static final int FUTEX_FD = 2;
+    private static final int FUTEX_REQUEUE = 3;
+    private static final int FUTEX_CMP_REQUEUE = 4;
 
-    private static final int ETIMEDOUT = 110;
+    public static final int ETIMEDOUT = 110;
 
     protected int futex(Emulator<?> emulator) {
         RegisterContext context = emulator.getContext();
@@ -266,32 +305,30 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         boolean isPrivate = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
         int cmd = futex_op & FUTEX_CMD_MASK;
         if (log.isDebugEnabled()) {
-            log.debug("futex uaddr=" + uaddr + ", isPrivate=" + isPrivate + ", cmd=" + cmd + ", val=0x" + Integer.toHexString(val) + ", old=0x" + Integer.toHexString(old) + ", LR=" + context.getLRPointer());
+            log.debug("futex uaddr={}, isPrivate={}, cmd={}, val=0x{}, old=0x{}, LR={}", uaddr, isPrivate, cmd, Integer.toHexString(val), Integer.toHexString(old), context.getLRPointer());
         }
 
         Task task = emulator.get(Task.TASK_KEY);
         switch (cmd) {
             case FUTEX_WAIT:
                 if (old != val) {
-                    Memory memory = emulator.getMemory();
-                    memory.setErrno(UnixEmulator.EAGAIN);
-                    return -1;
+                    return -UnixEmulator.EAGAIN;
                 }
                 Pointer timeout = context.getPointerArg(3);
                 TimeSpec timeSpec = timeout == null ? null : TimeSpec.createTimeSpec(emulator, timeout);
                 int mtype = val & MUTEX_TYPE_MASK;
                 int shared = val & MUTEX_SHARED_MASK;
                 if (log.isDebugEnabled()) {
-                    log.debug("futex FUTEX_WAIT mtype=0x" + Integer.toHexString(mtype) + ", shared=" + shared + ", timeSpec=" + timeSpec + ", test=" + (mtype | shared) + ", task=" + task);
+                    log.debug("futex FUTEX_WAIT mtype=0x{}, shared={}, timeSpec={}, test={}, task={}", Integer.toHexString(mtype), shared, timeSpec, mtype | shared, task);
                 }
                 RunnableTask runningTask = emulator.getThreadDispatcher().getRunningTask();
                 if (threadDispatcherEnabled && runningTask != null) {
                     if (timeSpec == null) {
-                        runningTask.setWaiter(new FutexIndefinitelyWaiter(uaddr, val));
-                        throw new ThreadContextSwitchException();
+                        runningTask.setWaiter(emulator, new FutexIndefinitelyWaiter(uaddr, val));
                     } else {
-                        throw new ThreadContextSwitchException().setReturnValue(-ETIMEDOUT);
+                        runningTask.setWaiter(emulator, new FutexNanoSleepWaiter(uaddr, val, timeSpec));
                     }
+                    throw new ThreadContextSwitchException();
                 }
                 if (threadDispatcherEnabled && emulator.getThreadDispatcher().getTaskCount() > 1) {
                     throw new ThreadContextSwitchException().setReturnValue(-ETIMEDOUT);
@@ -300,7 +337,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
                 }
             case FUTEX_WAKE:
                 if (log.isDebugEnabled()) {
-                    log.debug("futex FUTEX_WAKE val=0x" + Integer.toHexString(val) + ", old=" + old + ", task=" + task);
+                    log.debug("futex FUTEX_WAKE val=0x{}, old={}, task={}", Integer.toHexString(val), old, task);
                 }
                 if (emulator.getThreadDispatcher().getTaskCount() <= 1) {
                     return 0;
@@ -323,7 +360,15 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
                     throw new ThreadContextSwitchException().setReturnValue(1);
                 }
                 return 0;
+            case FUTEX_CMP_REQUEUE:
+                if (log.isDebugEnabled()) {
+                    log.debug("futex FUTEX_CMP_REQUEUE val=0x{}, old={}, task={}", Integer.toHexString(val), old, task);
+                }
+                return 0;
             default:
+                if (log.isDebugEnabled()) {
+                    emulator.attach().debug();
+                }
                 throw new AbstractMethodError("futex_op=0x" + Integer.toHexString(futex_op));
         }
     }
@@ -350,7 +395,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         if (!task.isMainThread()) {
             throw new ThreadContextSwitchException().setReturnValue(-UnixEmulator.EINTR);
         }
-        log.info("rt_sigtimedwait set=" + set + ", info=" + info + ", timeout=" + timeout + ", sigsetsize=" + sigsetsize + ", sigSet=" + sigSet + ", task=" + task);
+        log.info("rt_sigtimedwait set={}, info={}, timeout={}, sigsetsize={}, sigSet={}, task={}", set, info, timeout, sigsetsize, sigSet, task);
         Log log = LogFactory.getLog(AbstractEmulator.class);
         if (log.isDebugEnabled()) {
             emulator.attach().debug();
@@ -364,7 +409,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int sig = context.getIntArg(1);
         UnidbgPointer info = context.getPointerArg(2);
         if (log.isDebugEnabled()) {
-            log.debug("rt_sigqueue tgid=" + tgid + ", sig=" + sig);
+            log.debug("rt_sigqueue tgid={}, sig={}", tgid, sig);
         }
         Task task = emulator.get(Task.TASK_KEY);
         // 检查pid是有匹配进程存在
@@ -402,7 +447,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
     protected long statfs64(Emulator<AndroidFileIO> emulator, String path, Pointer buf) {
         FileResult<AndroidFileIO> result = resolve(emulator, path, IOConstants.O_RDONLY);
         if (result == null) {
-            log.info("statfs64 buf=" + buf + ", path=" + path);
+            log.info("statfs64 buf={}, path={}", buf, path);
             emulator.getMemory().setErrno(UnixEmulator.ENOENT);
             return -1;
         }
@@ -410,18 +455,18 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
             StatFS statFS = emulator.is64Bit() ? new StatFS64(buf) : new StatFS32(buf);
             int ret = result.io.statfs(statFS);
             if (ret != 0) {
-                log.info("statfs64 buf=" + buf + ", path=" + path);
+                log.info("statfs64 buf={}, path={}, ret={}", buf, path, ret);
             } else {
                 if (verbose) {
                     System.out.printf("File statfs '%s' from %s%n", result.io, emulator.getContext().getLRPointer());
                 }
                 if (log.isDebugEnabled()) {
-                    log.debug("statfs64 buf=" + buf + ", path=" + path);
+                    log.debug("statfs64 buf={}, path={}", buf, path);
                 }
             }
             return ret;
         } else {
-            log.info("statfs64 buf=" + buf + ", path=" + path);
+            log.info("statfs64 buf={}, path={}", buf, path);
             emulator.getMemory().setErrno(result.errno);
             return -1;
         }
@@ -440,7 +485,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
             pipefd.setInt(0, readfd);
             pipefd.setInt(4, writefd);
             if (log.isDebugEnabled()) {
-                log.debug("pipe2 pipefd=" + pipefd + ", flags=0x" + flags + ", readfd=" + readfd + ", writefd=" + writefd);
+                log.debug("pipe2 pipefd={}, flags=0x{}, readfd={}, writefd={}", pipefd, flags, readfd, writefd);
             }
         } catch (IOException e) {
             throw new IllegalStateException(e);
@@ -465,7 +510,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int flags = context.getIntArg(3);
         String pathname = pathname_p.getString(0);
         if (log.isDebugEnabled()) {
-            log.debug("fchmodat dirfd=" + dirfd + ", pathname=" + pathname + ", mode=0x" + Integer.toHexString(mode) + ", flags=0x" + Integer.toHexString(flags));
+            log.debug("fchmodat dirfd={}, pathname={}, mode=0x{}, flags=0x{}", dirfd, pathname, Integer.toHexString(mode), Integer.toHexString(flags));
         }
         return 0;
     }
@@ -479,7 +524,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int flags = context.getIntArg(4);
         String pathname = pathname_p.getString(0);
         if (log.isDebugEnabled()) {
-            log.debug("fchownat dirfd=" + dirfd + ", pathname=" + pathname + ", owner=" + owner + ", group=" + group + ", flags=0x" + Integer.toHexString(flags));
+            log.debug("fchownat dirfd={}, pathname={}, owner={}, group={}, flags=0x{}", dirfd, pathname, owner, group, Integer.toHexString(flags));
         }
         return 0;
     }
@@ -491,18 +536,18 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int mode = context.getIntArg(2);
         String pathname = pathname_p.getString(0);
         if (log.isDebugEnabled()) {
-            log.debug("mkdirat dirfd=" + dirfd + ", pathname=" + pathname + ", mode=" + Integer.toHexString(mode));
+            log.debug("mkdirat dirfd={}, pathname={}, mode={}", dirfd, pathname, Integer.toHexString(mode));
         }
         if (dirfd != IO.AT_FDCWD) {
             throw new BackendException();
         }
         if (emulator.getFileSystem().mkdir(pathname, mode)) {
             if (log.isDebugEnabled()) {
-                log.debug("mkdir pathname=" + pathname + ", mode=" + mode);
+                log.debug("mkdir pathname={}, mode={}", pathname, mode);
             }
             return 0;
         } else {
-            log.info("mkdir pathname=" + pathname + ", mode=" + mode);
+            log.info("mkdir pathname={}, mode={}", pathname, mode);
             emulator.getMemory().setErrno(UnixEmulator.EACCES);
             return -1;
         }
@@ -537,7 +582,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         Pointer ss = context.getPointerArg(0);
         Pointer old_ss = context.getPointerArg(1);
         if (log.isDebugEnabled()) {
-            log.debug("sigaltstack ss=" + ss + ", old_ss=" + old_ss);
+            log.debug("sigaltstack ss={}, old_ss={}", ss, old_ss);
         }
         return 0;
     }
@@ -550,9 +595,9 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         String newpath = context.getPointerArg(3).getString(0);
         int ret = emulator.getFileSystem().rename(oldpath, newpath);
         if (ret != 0) {
-            log.info("renameat olddirfd=" + olddirfd + ", oldpath=" + oldpath + ", newdirfd=" + newdirfd + ", newpath=" + newpath);
+            log.info("renameat olddirfd={}, oldpath={}, newdirfd={}, newpath={}", olddirfd, oldpath, newdirfd, newpath);
         } else {
-            log.debug("renameat olddirfd=" + olddirfd + ", oldpath=" + oldpath + ", newdirfd=" + newdirfd + ", newpath=" + newpath);
+            log.debug("renameat olddirfd={}, oldpath={}, newdirfd={}, newpath={}", olddirfd, oldpath, newdirfd, newpath);
         }
         return 0;
     }
@@ -564,7 +609,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int flags = context.getIntArg(2);
         emulator.getFileSystem().unlink(pathname.getString(0));
         if (log.isDebugEnabled()) {
-            log.info("unlinkat dirfd=" + dirfd + ", pathname=" + pathname.getString(0) + ", flags=" + flags);
+            log.info("unlinkat dirfd={}, pathname={}, flags={}", dirfd, pathname.getString(0), flags);
         }
         return 0;
     }
@@ -605,7 +650,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         SigAction action = SigAction.create(emulator, act);
         SigAction oldAction = SigAction.create(emulator, oldact);
         if (log.isDebugEnabled()) {
-            log.debug("sigaction signum=" + signum + ", action=" + action + ", oldAction=" + oldAction);
+            log.debug("sigaction signum={}, action={}, oldAction={}", signum, action, oldAction);
         }
         if (SIGKILL == signum || SIGSTOP == signum) {
             if (oldAction != null) {
@@ -634,7 +679,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int pid = context.getIntArg(0);
         int sig = context.getIntArg(1);
         if (log.isDebugEnabled()) {
-            log.debug("kill pid=" + pid + ", sig=" + sig);
+            log.debug("kill pid={}, sig={}", pid, sig);
         }
         if (sig == 0) {
             return 0;
@@ -671,7 +716,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int tid = context.getIntArg(1);
         int sig = context.getIntArg(2);
         if (log.isDebugEnabled()) {
-            log.debug("tgkill tgid=" + tgid + ", tid=" + tid + ", sig=" + sig);
+            log.debug("tgkill tgid={}, tid={}, sig={}", tgid, tid, sig);
         }
         if (sig == 0) {
             return 0;
@@ -680,7 +725,8 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
             return -UnixEmulator.EINVAL;
         }
         SigAction action = sigActionMap.get(sig);
-        if (emulator.getThreadDispatcher().sendSignal(tid, sig, action == null ? null : new SignalTask(sig, action))) {
+        if (threadDispatcherEnabled &&
+                emulator.getThreadDispatcher().sendSignal(tid, sig, action == null || action.getSaHandler() == 0L ? null : new SignalTask(sig, action))) {
             throw new ThreadContextSwitchException().setReturnValue(0);
         }
         return 0;
@@ -690,7 +736,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         RegisterContext context = emulator.getContext();
         Pointer tidptr = context.getPointerArg(0);
         if (log.isDebugEnabled()) {
-            log.debug("set_tid_address tidptr=" + tidptr);
+            log.debug("set_tid_address tidptr={}", tidptr);
         }
         Task task = emulator.get(Task.TASK_KEY);
         if (task instanceof MarshmallowThread) {
@@ -715,11 +761,11 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         Pointer rem = context.getPointerArg(1);
         TimeSpec timeSpec = TimeSpec.createTimeSpec(emulator, req);
         if (log.isDebugEnabled()) {
-            log.debug("nanosleep req=" + req + ", rem=" + rem + ", timeSpec=" + timeSpec);
+            log.debug("nanosleep req={}, rem={}, timeSpec={}", req, rem, timeSpec);
         }
         RunnableTask runningTask = emulator.getThreadDispatcher().getRunningTask();
         if (threadDispatcherEnabled && runningTask != null) {
-            runningTask.setWaiter(new NanoSleepWaiter(emulator, rem, timeSpec));
+            runningTask.setWaiter(emulator, new NanoSleepWaiter(emulator, rem, timeSpec));
             throw new ThreadContextSwitchException().setReturnValue(0);
         } else {
             try {
@@ -737,7 +783,7 @@ public abstract class AndroidSyscallHandler extends UnixSyscallHandler<AndroidFi
         int offset = context.getIntArg(2);
         int len = context.getIntArg(3);
         if (log.isDebugEnabled()) {
-            log.debug("fallocate fd=" + fd + ", mode=0x" + Integer.toHexString(mode) + ", offset=" + offset + ", len=" + len);
+            log.debug("fallocate fd={}, mode=0x{}, offset={}, len={}", fd, Integer.toHexString(mode), offset, len);
         }
         return 0;
     }

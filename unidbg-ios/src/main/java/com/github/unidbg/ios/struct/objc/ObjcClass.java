@@ -11,9 +11,12 @@ import java.util.List;
 /**
  * objc_class
  */
-public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
+public abstract class ObjcClass extends ObjcObject implements ObjcConstants, com.github.unidbg.ios.objc.processor.ObjcClass {
 
     public static ObjcClass create(Emulator<?> emulator, Pointer pointer) {
+        if (pointer == null) {
+            return null;
+        }
         ObjcClass objcClass = emulator.is64Bit() ? new ObjcClass64(emulator, pointer) : new ObjcClass32(emulator, pointer);
         objcClass.unpack();
         return objcClass;
@@ -21,6 +24,11 @@ public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
 
     protected ObjcClass(Emulator<?> emulator, Pointer p) {
         super(emulator, p);
+    }
+
+    @SuppressWarnings("unused")
+    public ObjcObject newObjc() {
+        return callObjc("new");
     }
 
     @Override
@@ -34,7 +42,7 @@ public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
 
     private ClassRW data() {
         UnidbgPointer pointer = getDataPointer(emulator);
-        long address = pointer.peer & ~CLASS_FAST_FLAG_MASK;
+        long address = pointer.peer & FAST_DATA_MASK;
         ClassRW classRW = emulator.is64Bit() ? new ClassRW64(UnidbgPointer.pointer(emulator, address)) : new ClassRW32(UnidbgPointer.pointer(emulator, address));
         classRW.unpack();
         return classRW;
@@ -42,7 +50,7 @@ public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
 
     private ClassRO ro() {
         UnidbgPointer pointer = getDataPointer(emulator);
-        long address = pointer.peer & ~CLASS_FAST_FLAG_MASK;
+        long address = pointer.peer & FAST_DATA_MASK;
         ClassRO classRO = emulator.is64Bit() ? new ClassRO64(UnidbgPointer.pointer(emulator, address)) : new ClassRO32(UnidbgPointer.pointer(emulator, address));
         classRO.unpack();
         return classRO;
@@ -52,6 +60,7 @@ public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
         return (data().ro(emulator).flags & RO_META) != 0;
     }
 
+    @Override
     public ObjcClass getMeta() {
         if (isMetaClass()) {
             return this;
@@ -68,12 +77,21 @@ public abstract class ObjcClass extends ObjcObject implements ObjcConstants {
         return (data().flags & RO_FUTURE) != 0;
     }
 
+    @Override
     public String getName() {
+        ClassRO ro;
         if (isRealized()  ||  isFuture()) {
-            return data().ro(emulator).getNamePointer(emulator).getString(0);
+            ClassRW data = data();
+            ro = data.ro(emulator);
         } else {
-            return ro().getNamePointer(emulator).getString(0);
+            ro = ro();
         }
+        Pointer pointer = ro.getNamePointer(emulator);
+        if (pointer == null) {
+            ClassRW data = data();
+            throw new IllegalStateException("data=" + data);
+        }
+        return pointer.getString(0);
     }
 
 }

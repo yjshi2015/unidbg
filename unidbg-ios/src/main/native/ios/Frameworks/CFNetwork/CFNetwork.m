@@ -29,7 +29,13 @@ CFMutableURLRequestRef CFURLRequestCreateMutable(
 CFStringRef CFURLRequestCopyHTTPHeaderFieldValue(
   CFURLRequestRef   request,
   CFStringRef	   headerField) {
+  if(!request->headerFields || !headerField) {
+    return NULL;
+  }
   CFStringRef value = CFDictionaryGetValue(request->headerFields, headerField);
+  if(!value) {
+    return NULL;
+  }
   return CFStringCreateCopy(kCFAllocatorDefault, value);
 }
 
@@ -107,7 +113,9 @@ void CFURLRequestSetMultipleHTTPHeaderFields(
     print_lr(buf, lr);
     fprintf(stderr, "CFURLRequestSetMultipleHTTPHeaderFields request=%p, LR=%s\n", mutableHTTPRequest, buf);
   }
-  mutableHTTPRequest->multipleHeaderFields = CFRetain(headerFields);
+  if(headerFields) {
+    mutableHTTPRequest->multipleHeaderFields = CFRetain(headerFields);
+  }
 }
 
 void CFURLRequestSetHTTPRequestMethod(
@@ -121,7 +129,7 @@ void CFURLRequestSetHTTPRequestMethod(
   if(is_debug()) {
     char buf[512];
     print_lr(buf, lr);
-    fprintf(stderr, "CFURLRequestSetHTTPRequestMethod request=%p, LR=%s\n", mutableHTTPRequest, buf);
+    fprintf(stderr, "CFURLRequestSetHTTPRequestMethod request=%p, method=%s, LR=%s\n", mutableHTTPRequest, CFStringGetCStringPtr(httpMethod, kCFStringEncodingUTF8), buf);
   }
   mutableHTTPRequest->httpMethod = CFRetain(httpMethod);
 }
@@ -145,7 +153,18 @@ void CFURLRequestSetCachePolicy(
 void CFURLRequestSetHTTPRequestBody(
   CFMutableURLRequestRef   mutableHTTPRequest,
   CFDataRef				httpBody) {
+  uintptr_t lr = (uintptr_t) __builtin_return_address(0);
+  if(is_debug()) {
+    char buf[512];
+    print_lr(buf, lr);
+    char *memory = cfdata_hex(httpBody);
+    fprintf(stderr, "CFURLRequestSetHTTPRequestBody request=%p, body=%s, LR=%s\n", mutableHTTPRequest, memory, buf);
+    if(memory) { free(memory); }
+  }
   mutableHTTPRequest->httpBody = CFRetain(httpBody);
+}
+
+void CFURLRequestSetTimeoutInterval(CFMutableURLRequestRef request, double timeoutInterval) {
 }
 
 void _CFURLProtocolRegisterFoundationBridge(void *impl, Boolean preferCFURLProtocol) {

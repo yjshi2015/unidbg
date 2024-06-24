@@ -10,7 +10,6 @@ import com.github.unidbg.hook.DispatchAsyncCallback;
 import com.github.unidbg.hook.HookLoader;
 import com.github.unidbg.ios.ipa.SymbolResolver;
 import com.github.unidbg.memory.Memory;
-import com.github.unidbg.pointer.UnidbgPointer;
 import com.sun.jna.Pointer;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
@@ -28,16 +27,16 @@ public class SwiftTest {
 
         Memory memory = emulator.getMemory();
         memory.addHookListener(new SymbolResolver(emulator));
-        memory.setLibraryResolver(new DarwinResolver());
+        memory.setLibraryResolver(new DarwinResolver().setOverride());
         emulator.getSyscallHandler().setVerbose(false);
         emulator.getSyscallHandler().setEnableThreadDispatcher(true);
 
         Module module = emulator.loadLibrary(new File("unidbg-ios/src/test/resources/example_binaries/swift_test"));
         HookLoader.load(emulator).hookDispatchAsync(new DispatchAsyncCallback() {
             @Override
-            public boolean canDispatch(Pointer dq, Pointer fun) {
-                System.out.println("canDispatch dq=" + dq + ", fun=" + fun);
-                return UnidbgPointer.nativeValue(fun) != 0x100004a24L;
+            public boolean canDispatch(Emulator<?> emulator, Pointer dq, Pointer fun, boolean is_barrier_async) {
+                System.out.println("canDispatch dq=" + dq + ", fun=" + fun + ", is_barrier_async=" + is_barrier_async);
+                return true;
             }
         });
         long start = System.currentTimeMillis();

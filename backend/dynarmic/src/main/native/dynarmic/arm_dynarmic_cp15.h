@@ -8,6 +8,7 @@
 #include <optional>
 
 #ifdef DYNARMIC_MASTER
+#include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/A32/coprocessor.h>
 #else
 #include <dynarmic/A32/coprocessor.h>

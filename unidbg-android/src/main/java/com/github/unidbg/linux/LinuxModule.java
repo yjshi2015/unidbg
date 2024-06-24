@@ -59,7 +59,7 @@ public class LinuxModule extends Module {
             log.debug("createVirtualModule first=0x" + Long.toHexString(first.peer) + ", last=0x" + Long.toHexString(last.peer) + ", base=0x" + Long.toHexString(base) + ", size=0x" + Long.toHexString(size));
         }
 
-        LinuxModule module = new LinuxModule(base, size, name, null,
+        LinuxModule module = new LinuxModule(base, base, size, name, null,
                 Collections.<ModuleSymbol>emptyList(), Collections.<InitFunction>emptyList(),
                 Collections.<String, Module>emptyMap(), Collections.<MemRegion>emptyList(),
                 null, null, null, null, null, null) {
@@ -95,13 +95,15 @@ public class LinuxModule extends Module {
     private final ElfSection symbolTableSection;
     public final ElfFile elfFile;
     public final ElfDynamicStructure dynamicStructure;
+    public final long virtualBase;
 
-    LinuxModule(long base, long size, String name, SymbolLocator dynsym,
+    LinuxModule(long virtualBase, long base, long size, String name, SymbolLocator dynsym,
                 List<ModuleSymbol> unresolvedSymbol, List<InitFunction> initFunctionList, Map<String, Module> neededLibraries, List<MemRegion> regions,
                 MemoizedObject<ArmExIdx> armExIdx, MemoizedObject<GnuEhFrameHeader> ehFrameHeader,
                 ElfSection symbolTableSection, ElfFile elfFile, ElfDynamicStructure dynamicStructure, LibraryFile libraryFile) {
         super(name, base, size, neededLibraries, regions, libraryFile);
 
+        this.virtualBase = virtualBase;
         this.dynsym = dynsym;
         this.unresolvedSymbol = unresolvedSymbol;
         this.initFunctionList = initFunctionList;
@@ -150,6 +152,8 @@ public class LinuxModule extends Module {
         return unresolvedSymbol;
     }
 
+    final Map<String, ModuleSymbol> resolvedSymbols = new HashMap<>();
+
     @Override
     public Symbol findSymbolByName(String name, boolean withDependencies) {
         try {
@@ -172,9 +176,9 @@ public class LinuxModule extends Module {
     }
 
     @Override
-    public Symbol findClosestSymbolByAddress(long addr, boolean fast) {
+    public Symbol findClosestSymbolByAddress(long address, boolean fast) {
         try {
-            long soaddr = addr - base;
+            long soaddr = address - base;
             if (soaddr <= 0) {
                 return null;
             }
@@ -187,7 +191,7 @@ public class LinuxModule extends Module {
                 symbol = new LinuxSymbol(this, elfSymbol);
             }
             long entry = base + entryPoint;
-            if (addr >= entry && (symbol == null || entry > symbol.getAddress())) {
+            if (address >= entry && (symbol == null || entry > symbol.getAddress())) {
                 symbol = new VirtualSymbol("start", this, entry);
             }
             return symbol;
